@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FORK_DIR="${1:?Usage: mirror <fork-dir>}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+
+upstream="$(cat "$CONFIG_DIR/upstream.txt")"
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+echo "Mirroring $upstream → $fork"
+git clone --mirror "$upstream" "$tmpdir/repo.git"
+git -C "$tmpdir/repo.git" push --mirror "$fork"
+echo "Done."

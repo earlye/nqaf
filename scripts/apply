@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENGINE="oneclaw"
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --engine) ENGINE="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+FORK_DIR="${1:?Usage: apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]}"
+shift
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+WORK_DIR="$CONFIG_DIR/work"
+
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+if [ ! -d "$WORK_DIR/.git" ]; then
+  echo "Cloning $fork → $WORK_DIR"
+  git clone "$fork" "$WORK_DIR"
+else
+  echo "Resetting $WORK_DIR to origin HEAD"
+  git -C "$WORK_DIR" fetch origin
+  git -C "$WORK_DIR" reset --hard origin/HEAD
+  git -C "$WORK_DIR" clean -fd
+fi
+
+mkdir -p "$WORK_DIR/.claude"
+cat > "$WORK_DIR/.claude/settings.json" <<'EOF'
+{
+  "defaultMode": "bypassPermissions"
+}
+EOF
+
+if [ "$#" -gt 0 ]; then
+  prompts=("$@")
+else
+  prompts=("$CONFIG_DIR/prompts/"*.md)
+fi
+
+for prompt in "${prompts[@]}"; do
+  echo "Applying $(basename "$prompt")..."
+  case "$ENGINE" in
+    oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$(cat "$prompt")") ;;
+    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$(cat "$prompt")") ;;
+    *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
+  esac
+done
+
+echo "Done. Working tree left dirty in $WORK_DIR"
