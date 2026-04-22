@@ -41,6 +41,8 @@ else
 fi
 
 for prompt in "${prompts[@]}"; do
+  prompt="$(realpath "$prompt")"
+  [ -f "$prompt" ] || { echo "Prompt not found: $prompt" >&2; exit 1; }
   echo "Applying $(basename "$prompt")..."
   case "$ENGINE" in
     oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$(cat "$prompt")") ;;

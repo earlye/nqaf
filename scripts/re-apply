@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENGINE="oneclaw"
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --engine) ENGINE="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+FORK_DIR="${1:?Usage: re-apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]}"
+shift
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+WORK_DIR="$CONFIG_DIR/work"
+
+upstream="$(cat "$CONFIG_DIR/upstream.txt")"
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+if [ ! -d "$WORK_DIR/.git" ]; then
+  echo "Cloning $fork → $WORK_DIR"
+  git clone "$fork" "$WORK_DIR"
+fi
+
+# Ensure upstream remote exists
+if git -C "$WORK_DIR" remote get-url upstream &>/dev/null; then
+  git -C "$WORK_DIR" remote set-url upstream "$upstream"
+else
+  git -C "$WORK_DIR" remote add upstream "$upstream"
+fi
+
+echo "Fetching origin and upstream..."
+git -C "$WORK_DIR" fetch origin
+git -C "$WORK_DIR" fetch upstream
+
+upstream_head="$(git -C "$WORK_DIR" rev-parse upstream/HEAD)"
+origin_head="$(git -C "$WORK_DIR" rev-parse origin/HEAD)"
+
+if [ "$upstream_head" = "$origin_head" ]; then
+  echo "No upstream changes detected; fork is up to date."
+  exit 0
+fi
+
+echo "Upstream has new commits. Attempting auto-merge..."
+
+mkdir -p "$WORK_DIR/.claude"
+cat > "$WORK_DIR/.claude/settings.json" <<'EOF'
+{
+  "defaultMode": "bypassPermissions"
+}
+EOF
+
+if [ "$#" -gt 0 ]; then
+  prompts=("$@")
+else
+  prompts=("$CONFIG_DIR/prompts/"*.md)
+fi
+
+for i in "${!prompts[@]}"; do
+  prompts[$i]="$(realpath "${prompts[$i]}")"
+  [ -f "${prompts[$i]}" ] || { echo "Prompt not found: ${prompts[$i]}" >&2; exit 1; }
+done
+
+run_prompts() {
+  for prompt in "${prompts[@]}"; do
+    echo "Applying $(basename "$prompt")..."
+    case "$ENGINE" in
+      oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$(cat "$prompt")") ;;
+      claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$(cat "$prompt")") ;;
+      *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
+    esac
+  done
+}
+
+run_tests() {
+  echo "Running tests..."
+  (cd "$WORK_DIR" && make test)
+}
+
+# Try auto-merge: reset to origin/HEAD then merge upstream
+git -C "$WORK_DIR" reset --hard origin/HEAD
+git -C "$WORK_DIR" clean -fd
+
+if git -C "$WORK_DIR" merge --no-edit upstream/HEAD; then
+  if run_tests; then
+    echo "Auto-merge succeeded and tests pass. Working tree left dirty in $WORK_DIR"
+    exit 0
+  else
+    echo "Auto-merge succeeded but tests failed. Falling back to re-apply from upstream."
+  fi
+else
+  echo "Auto-merge failed. Falling back to re-apply from upstream."
+  git -C "$WORK_DIR" merge --abort 2>/dev/null || true
+fi
+
+echo "Resetting to upstream/HEAD and re-applying prompts..."
+git -C "$WORK_DIR" reset --hard upstream/HEAD
+git -C "$WORK_DIR" clean -fd
+
+run_prompts
+
+echo "Done. Working tree left dirty in $WORK_DIR"
