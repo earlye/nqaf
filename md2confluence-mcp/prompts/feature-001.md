@@ -77,6 +77,71 @@ Replace the kroki.io call with a local render via `@mermaid-js/mermaid-cli`
   label-escaping logic, be aware of it and don't "helpfully" strip/escape `#`
   in a way that changes unrelated diagrams.
 
+## Problem 3 — README Installation section documents the wrong (unpatched) install path
+
+The README's "Installation" section (both the "Claude Code" and
+"Project-specific" snippets) tells readers to run
+`"command": "npx", "args": ["-y", "md2confluence-mcp"]` — the published
+upstream npm package. A reader following this fork's README would never
+actually run Fix 1/Fix 2 above; they'd silently get the unpatched, published
+version instead.
+
+## Fix 3
+
+Rewrite the Installation section to document building and running this fork
+from source instead of `npx`-ing the published package:
+
+- `git clone <this fork> && cd md2confluence-mcp && npm install && npm run build`
+- Then point the MCP config's `confluence` server at the built output directly:
+  ```json
+  {
+    "mcpServers": {
+      "confluence": {
+        "command": "node",
+        "args": ["/absolute/path/to/md2confluence-mcp/dist/index.js"],
+        "env": {
+          "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
+          "CONFLUENCE_EMAIL": "your@email.com"
+        }
+      }
+    }
+  }
+  ```
+  (note `CONFLUENCE_TOKEN` is intentionally omitted from the example now that
+  Fix 1 supports reading it from `pass`).
+- Apply this to both the "Claude Code" and "Project-specific" snippets.
+- This prompt only rewrites the fork's own README to describe how to build
+  and install *this* fork correctly — it does not modify any MCP config on
+  the machine the prompt happens to run on.
+
+## Integration tests
+
+Building on the `node:test` harness from `feature-000.md`, add:
+
+- `src/config.test.ts` covering `resolveConfluenceToken`:
+  - **Fixture setup/teardown**: before the test, create a throwaway `pass`
+    entry via `pass insert -m -f <test-entry>` (piping a known dummy value on
+    stdin so it's non-interactive), pointing at a test-only path (not
+    `confluence/api-token`); after the test, `pass rm -f <test-entry>`. Do not
+    depend on any pre-existing entry in the developer's real password store.
+  - Assert that calling `resolveConfluenceToken({ CONFLUENCE_TOKEN_PASS_ENTRY: <test-entry> })`
+    (with `CONFLUENCE_TOKEN` absent from the passed env) returns exactly the
+    dummy value.
+  - Assert the override path: when `CONFLUENCE_TOKEN` is present in the
+    passed env, `resolveConfluenceToken` returns it as-is (use a
+    `CONFLUENCE_TOKEN_PASS_ENTRY` that doesn't exist, to prove `pass` is never
+    consulted in this path).
+- A new mermaid-rendering test (e.g. in `src/converter.test.ts`) covering
+  Fix 2: call the exported `convertMarkdownToConfluence` with a markdown
+  string containing a fenced ` ```mermaid ` block, assert the returned
+  `attachments` array has exactly one entry, and assert its `.data` buffer's
+  first 8 bytes match the PNG magic number (`89 50 4E 47 0D 0A 1A 0A`). This
+  test invokes the real `npx ... mmdc` — on a machine without
+  `@mermaid-js/mermaid-cli` cached, the first run downloads a headless
+  Chromium and can take minutes. Give this specific test a generous timeout
+  (e.g. pass `{ timeout: 120_000 }` to `node:test`'s `test()`) rather than
+  relying on the runner's default.
+
 ## Do not make other changes.
 
 Leave the Confluence upload/storage-format-conversion logic, the tool list,
