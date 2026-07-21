@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENGINE="oneclaw"
+ENGINE="claude"
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;
@@ -9,7 +9,7 @@ while [[ "${1:-}" == --* ]]; do
   esac
 done
 
-USAGE="Usage: apply [--engine oneclaw|claude] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
+USAGE="Usage: apply [--engine claude|oneclaw] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
 FORK_DIR="${1:?$USAGE}"
 shift
 BRANCH="${1:?$USAGE}"
