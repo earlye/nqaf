@@ -40,15 +40,29 @@ set up or refresh a fork.
    hard-reset the fork remote back to a raw upstream mirror (destructive —
    it overwrites the fork remote's history).
 
-2. **`scripts/apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]`**
-   — clones the fork remote into `<fork-dir>/work` (or resets an existing
-   `work/` to `origin/HEAD` if already cloned), then applies prompts in
-   filename order (all of `prompts/*.md` by default, or just the specific
-   ones you list) by running the coding agent against that working copy, one
-   prompt at a time. Use this:
-   - the first time you apply prompts to a freshly-mirrored fork, or
-   - to apply one or more newly-added prompts to an existing `work/` clone
-     without re-running everything from scratch.
+2. **`scripts/apply [--engine oneclaw|claude] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
+   — clones the fork remote into `<fork-dir>/work` if needed, then checks out
+   `<branch>` (creating it from the fork's default branch if it doesn't exist
+   yet on origin, or checking out its current tip as-is if it does — this
+   never resets or rebases the branch, so re-running `apply` on the same
+   branch picks up right where it left off). Applies prompts in filename
+   order (all of `prompts/*.md` by default, or just the specific ones you
+   list) by running the coding agent against that working copy, one prompt
+   at a time. Each prompt first has the agent check whether the fix is
+   already present in the code (it may have been applied in an earlier run
+   or merged in from upstream) before deciding whether to actually change
+   anything; either way, the prompt gets recorded in `.nqaf/prompts/` in the
+   fork so future runs on this branch can skip it. After each prompt,
+   **any resulting changes are committed and pushed to `<branch>` on
+   origin immediately** — so progress survives even if a later prompt in
+   the same run fails. Once at least one prompt has run, it uses `gh` to
+   open a PR from `<branch>` into the fork's default branch (skipped if a
+   PR already exists for that branch, or if `gh` isn't installed/authed).
+   Use this:
+   - the first time you apply prompts to a fork, on a new branch, or
+   - to apply newly-added prompts on an existing, already-pushed branch
+     without redoing already-applied ones (they're skipped via
+     `.nqaf/prompts/`).
 
 3. **`scripts/re-apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]`**
    — for pulling in new upstream commits without losing already-applied
@@ -63,17 +77,17 @@ set up or refresh a fork.
    upstream instead of the old fork history. Run this periodically (whenever
    you know upstream has new commits you want).
 
-**None of these scripts commit or push anything.** They always leave
-`<fork-dir>/work` as a dirty working tree for you to review. After running
-`apply` or `re-apply`, go look at the diff in `<fork-dir>/work`, run the
-project's own test suite if the script didn't already do so for you, and
-commit/push to the fork remote yourself once you're satisfied with the
-result.
+**`apply` commits and pushes after every prompt, and opens a PR via `gh`.**
+`mirror` and `re-apply` do not — they always leave `<fork-dir>/work` as a
+dirty working tree for you to review, commit, and push yourself. `gh` needs
+to be installed and authenticated against the fork's GitHub repo for PR
+creation to happen; if it isn't, `apply` still does the commit/push part and
+just skips opening a PR.
 
 ## Quick reference
 
 | Situation | Run |
 |---|---|
-| Setting up a brand-new fork for the first time | `scripts/mirror <dir>` then `scripts/apply <dir>` |
-| Adding a newly-written prompt to an already-applied fork | `scripts/apply <dir> prompts/feature-NNN.md` |
+| Setting up a brand-new fork for the first time | `scripts/mirror <dir>` then `scripts/apply <dir> <branch>` |
+| Adding a newly-written prompt to an already-applied branch | `scripts/apply <dir> <branch> prompts/feature-NNN.md` |
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |
