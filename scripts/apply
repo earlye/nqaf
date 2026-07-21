@@ -43,12 +43,38 @@ fi
 for prompt in "${prompts[@]}"; do
   prompt="$(realpath "$prompt")"
   [ -f "$prompt" ] || { echo "Prompt not found: $prompt" >&2; exit 1; }
-  echo "Applying $(basename "$prompt")..."
+  prompt_name="$(basename "$prompt")"
+  marker="$WORK_DIR/.nqaf/prompts/$prompt_name"
+
+  if [ -f "$marker" ]; then
+    echo "Skipping $prompt_name (already recorded in .nqaf/prompts/)"
+    continue
+  fi
+
+  echo "Applying $prompt_name..."
+  wrapped_prompt="This fix may already be present in this codebase (applied in an
+earlier run, merged in from upstream, or implemented independently). Before
+making any changes: inspect the relevant code and determine whether the fix
+described below has already been fully implemented.
+
+- If it has already been fully implemented, make no code changes — just
+  confirm that it is already in place.
+- If it has not been fully implemented (in whole or in part), implement it
+  as described below.
+
+---
+
+$(cat "$prompt")"
+
   case "$ENGINE" in
-    oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$(cat "$prompt")") ;;
-    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$(cat "$prompt")") ;;
+    oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$wrapped_prompt") ;;
+    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$wrapped_prompt") ;;
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
+
+  mkdir -p "$WORK_DIR/.nqaf/prompts"
+  cp "$prompt" "$marker"
+  echo "Recorded $prompt_name as applied in .nqaf/prompts/"
 done
 
 echo "Done. Working tree left dirty in $WORK_DIR"
