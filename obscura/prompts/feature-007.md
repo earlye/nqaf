@@ -1,6 +1,6 @@
 # Fix: `SECURITY.md` claims a `cargo-deny`/`deny.toml` gate that doesn't exist
 
-## Problem
+## Problem [feature-007]
 
 `SECURITY.md` describes this project's dependency-vetting posture as including
 a `cargo-deny` check (advisory-database scanning for known-vulnerable/yanked

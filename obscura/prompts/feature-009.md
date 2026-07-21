@@ -1,6 +1,6 @@
 # Docs: append the full security review to `SECURITY.md`
 
-## Problem
+## Problem [feature-009]
 
 Other changes already made to this fork point a reader at "the review" behind
 its fixes without that review actually being anywhere inside the fork:

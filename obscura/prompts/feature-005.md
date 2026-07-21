@@ -1,6 +1,6 @@
 # Fix: cookie `Domain` attribute accepted for shared multi-label public suffixes
 
-## Problem
+## Problem [feature-005]
 
 `obscura-net`'s cookie jar correctly rejects a `Set-Cookie` response trying to
 scope a cookie to a bare single-label suffix (e.g. a response can't set

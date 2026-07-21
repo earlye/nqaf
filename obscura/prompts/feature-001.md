@@ -1,6 +1,6 @@
 # Fix: page-triggered navigation can read local files regardless of `allow_file_access`
 
-## Problem
+## Problem [feature-001]
 
 `BrowserContext` (in the `obscura-browser` crate) has an `allow_file_access: bool`
 field, defaulting to `false`, that is supposed to prevent a page from causing a

@@ -1,6 +1,6 @@
 # Docs: record the known-open, intentionally-unfixed findings in `SECURITY.md`
 
-## Problem
+## Problem [feature-008]
 
 An ad hoc security review of this fork surfaced several findings that are real
 gaps in the upstream code but are not being fixed in this fork, because this

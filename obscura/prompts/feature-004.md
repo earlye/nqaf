@@ -1,6 +1,6 @@
 # Fix: remove unsound raw-pointer `unsafe` blocks in `Element` and `ObscuraElemName`
 
-## Problem
+## Problem [feature-004]
 
 Two structs in this codebase hold raw pointers with no lifetime or ownership
 tie to what they point at, and dereference them via `unsafe` with no `SAFETY`

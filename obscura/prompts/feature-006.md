@@ -1,6 +1,6 @@
 # Fix: unbounded WebCrypto derive-bits parameters, and inconsistent op panic-guarding
 
-## Problem
+## Problem [feature-006]
 
 Three related gaps in `obscura-js`'s native op layer (the Rust functions that
 back JS-visible APIs like `crypto.subtle`):
