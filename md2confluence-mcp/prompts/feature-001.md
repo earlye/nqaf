@@ -1,5 +1,9 @@
 # Fix: read the Confluence token from `pass`, render Mermaid locally instead of via kroki.io
 
+This prompt depends on `feature-000.md` (test harness) having already run —
+it assumes a `"test"` script exists (`node --test` over compiled `dist/`) and
+that `src/**/*.test.ts` is the established location/convention for tests.
+
 ## Problem 1 — credential handling
 
 `src/index.ts` (lines 16-26) reads `CONFLUENCE_TOKEN` (and `CONFLUENCE_URL`/`CONFLUENCE_EMAIL`)
@@ -15,16 +19,32 @@ Retrieve `CONFLUENCE_TOKEN` from the user's `pass` password store
 
 - Add an optional `CONFLUENCE_TOKEN_PASS_ENTRY` env var (default:
   `confluence/api-token`) naming the `pass` entry to read.
-- At the same point `CONFLUENCE_TOKEN` is currently read in `src/index.ts`: if
-  `CONFLUENCE_TOKEN` is not already set in the environment, and `pass` is
-  available on `$PATH`, shell out to `pass show <entry>` (first line of output
-  only, trimmed) to populate the token instead of immediately erroring out.
-- Keep `CONFLUENCE_TOKEN` as a supported override — if it's already set in the
-  environment, use it directly and skip `pass` entirely (keeps this working
-  for CI / non-interactive use, and doesn't break existing setups).
-- If neither `CONFLUENCE_TOKEN` nor `pass` (nor a working `pass` entry) is
-  available, keep the existing startup error, but update its text to document
-  `pass` as the primary/recommended option and the env var as the fallback.
+- Extract the token-resolution logic into a new `src/config.ts`, exporting
+  `export async function resolveConfluenceToken(env: NodeJS.ProcessEnv = process.env): Promise<string>`.
+  Keeping this out of `index.ts` (the server entrypoint, which starts the
+  stdio transport on import) is what lets it be unit-tested directly without
+  booting the whole MCP server.
+- `resolveConfluenceToken`:
+  - If `env.CONFLUENCE_TOKEN` is already set, return it directly — do not
+    shell out to `pass` at all. This keeps CI / non-interactive setups
+    working and is a supported override.
+  - Otherwise, if `pass` is available on `$PATH`, run `pass show <entry>`
+    (`<entry>` = `env.CONFLUENCE_TOKEN_PASS_ENTRY`, default
+    `confluence/api-token`), take the first line of stdout, trimmed, and
+    return it.
+  - Use `child_process.execFile` (via `util.promisify`) with the command and
+    args passed as an array — `execFile('pass', ['show', entry])` — never a
+    shell string/`exec`, even though `entry` isn't attacker-facing.
+  - If neither path yields a token (env var unset, `pass` missing from
+    `$PATH`, or `pass show` exits non-zero because the entry doesn't exist),
+    return `""` and let the existing `validateConfig()` in `index.ts` produce
+    its startup error.
+- In `index.ts`, replace the top-level `const CONFLUENCE_TOKEN = process.env.CONFLUENCE_TOKEN || ""`
+  with a top-level `await resolveConfluenceToken()` call (this file is
+  `"type": "module"`, so top-level `await` is valid — don't reach for
+  `execFileSync`/blocking calls here).
+- Update `validateConfig()`'s error text to document `pass` as the
+  primary/recommended option and the env var as the fallback.
 - Update the README's "Get API Token" / env var docs to describe the `pass`
   workflow (`pass insert confluence/api-token`) as the recommended setup path.
 
