@@ -28,7 +28,7 @@ Each top-level directory (e.g. `obscura/`, `postgresparser/`,
 
 All three scripts live in `scripts/` and take a fork directory as their first
 positional argument (e.g. `scripts/apply obscura`). They run a coding agent
-**locally** (`--engine oneclaw` (default) or `--engine claude`) — there is no
+**locally** (`--engine claude` (default) or `--engine oneclaw`) — there is no
 cloud-hosted agent wired into this workflow, so none of this runs in CI. It's
 a manual, human-triggered maintenance step: run it yourself when you want to
 set up or refresh a fork.
@@ -40,7 +40,7 @@ set up or refresh a fork.
    hard-reset the fork remote back to a raw upstream mirror (destructive —
    it overwrites the fork remote's history).
 
-2. **`scripts/apply [--engine oneclaw|claude] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
+2. **`scripts/apply [--engine claude|oneclaw] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
    — clones the fork remote into `<fork-dir>/work` if needed, then checks out
    `<branch>` (creating it from the fork's default branch if it doesn't exist
    yet on origin, or checking out its current tip as-is if it does — this
@@ -64,7 +64,7 @@ set up or refresh a fork.
      without redoing already-applied ones (they're skipped via
      `.nqaf/prompts/`).
 
-3. **`scripts/re-apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]`**
+3. **`scripts/re-apply [--engine claude|oneclaw] <fork-dir> [prompts/feature-NNN.md ...]`**
    — for pulling in new upstream commits without losing already-applied
    fixes. Checks whether `upstream/HEAD` has moved past `origin/HEAD`; if
    not, it's a no-op. If upstream has moved, it first tries a plain

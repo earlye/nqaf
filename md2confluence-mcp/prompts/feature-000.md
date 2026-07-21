@@ -1,3 +1,4 @@
+# [feature-000.md]
 # Feature: add an automated test harness
 
 ## Problem

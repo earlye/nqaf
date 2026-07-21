@@ -1,3 +1,4 @@
+# [feature-001.md]
 # Fix: read the Confluence token from `pass`, render Mermaid locally instead of via kroki.io
 
 This prompt depends on `feature-000.md` (test harness) having already run —
