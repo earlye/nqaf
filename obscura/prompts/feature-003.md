@@ -1,6 +1,6 @@
 # Fix: enable `stealth` mode as a supported default, and close its SSRF gaps
 
-## Context
+## Context [feature-003]
 
 This fork intends to depend on `stealth` mode (the Cargo feature that swaps the
 normal HTTP client for a browser-TLS/HTTP2-fingerprint-emulating client, used to

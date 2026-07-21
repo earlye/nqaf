@@ -1,6 +1,6 @@
 # Fix: SSRF bypass via ES module dynamic `import()` / `<script type=module>`
 
-## Problem
+## Problem [feature-002]
 
 `obscura-net` protects against SSRF (a page reaching loopback/RFC1918/link-local/
 cloud-metadata addresses) via a custom DNS resolver (something like
