@@ -3,7 +3,10 @@
     "allow": [
       "Bash(./scripts/apply *)",
       "Bash(git -C /Users/earlye/Documents/github/earlye/nqaf/postgresparser/work status)",
-      "Bash(git -C /Users/earlye/Documents/github/earlye/nqaf/postgresparser/work diff --stat)"
+      "Bash(git -C /Users/earlye/Documents/github/earlye/nqaf/postgresparser/work diff --stat)",
+      "Read(//Users/earlye/Documents/github.com/earlye/dotclaude/**)",
+      "Read(//Users/earlye/**)",
+      "Read(//Users/earlye/.claude/**)"
     ]
   }
 }
