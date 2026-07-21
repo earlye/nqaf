@@ -9,7 +9,10 @@ while [[ "${1:-}" == --* ]]; do
   esac
 done
 
-FORK_DIR="${1:?Usage: apply [--engine oneclaw|claude] <fork-dir> [prompts/feature-NNN.md ...]}"
+USAGE="Usage: apply [--engine oneclaw|claude] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
+FORK_DIR="${1:?$USAGE}"
+shift
+BRANCH="${1:?$USAGE}"
 shift
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
@@ -20,11 +23,29 @@ fork="$(cat "$CONFIG_DIR/fork.txt")"
 if [ ! -d "$WORK_DIR/.git" ]; then
   echo "Cloning $fork → $WORK_DIR"
   git clone "$fork" "$WORK_DIR"
+fi
+
+echo "Fetching origin..."
+git -C "$WORK_DIR" fetch origin
+
+default_branch="$(git -C "$WORK_DIR" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"
+
+if git -C "$WORK_DIR" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+  echo "Branch '$BRANCH' exists on origin; checking it out at its current tip (no reset/rebase)"
+  git -C "$WORK_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
 else
-  echo "Resetting $WORK_DIR to origin HEAD"
-  git -C "$WORK_DIR" fetch origin
-  git -C "$WORK_DIR" reset --hard origin/HEAD
-  git -C "$WORK_DIR" clean -fd
+  echo "Branch '$BRANCH' does not exist on origin; creating it from origin/$default_branch"
+  git -C "$WORK_DIR" checkout -B "$BRANCH" "origin/$default_branch"
+  git -C "$WORK_DIR" push -u origin "$BRANCH"
+fi
+
+HAVE_GH=0
+if command -v gh >/dev/null 2>&1; then
+  HAVE_GH=1
+  echo "Setting gh default repo to $fork"
+  (cd "$WORK_DIR" && gh repo set-default "$fork")
+else
+  echo "gh not found; skipping gh repo set-default and later PR creation" >&2
 fi
 
 mkdir -p "$WORK_DIR/.claude"
@@ -74,7 +95,30 @@ $(cat "$prompt")"
 
   mkdir -p "$WORK_DIR/.nqaf/prompts"
   cp "$prompt" "$marker"
-  echo "Recorded $prompt_name as applied in .nqaf/prompts/"
+
+  git -C "$WORK_DIR" add -A
+  if git -C "$WORK_DIR" diff --cached --quiet; then
+    echo "No changes from $prompt_name; nothing to commit"
+  else
+    git -C "$WORK_DIR" commit -m "Apply $prompt_name"
+    git -C "$WORK_DIR" push origin "$BRANCH"
+    echo "Committed and pushed $prompt_name to $BRANCH"
+  fi
 done
 
-echo "Done. Working tree left dirty in $WORK_DIR"
+if [ "$HAVE_GH" -eq 1 ]; then
+  existing_pr="$(cd "$WORK_DIR" && gh pr list --head "$BRANCH" --state all --json number --jq '.[0].number' 2>/dev/null || true)"
+  if [ -n "$existing_pr" ]; then
+    echo "PR #$existing_pr already exists for $BRANCH → $default_branch"
+  else
+    echo "Creating PR for $BRANCH → $default_branch"
+    (cd "$WORK_DIR" && gh pr create \
+      --base "$default_branch" \
+      --head "$BRANCH" \
+      --title "NQAF: apply prompts on $BRANCH" \
+      --body "Automated by \`scripts/apply\`. Prompts applied so far are recorded in \`.nqaf/prompts/\`.") \
+      || echo "PR creation failed (e.g. nothing to merge yet, or gh not authenticated) — branch is still pushed" >&2
+  fi
+fi
+
+echo "Done."
