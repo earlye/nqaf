@@ -5,53 +5,75 @@
 **Status: resolved without a fork.** During implementation (self-review of
 the drafted `nqaf` prompt), found that `GitoxideLabs/gitoxide` merged
 [`PrepareFetch::with_revision()`](https://github.com/GitoxideLabs/gitoxide/commit/b1174b69b60b478be24f0b81787e95ac08564e7e)
-(PR [#1930](https://github.com/GitoxideLabs/gitoxide/pull/1930), merged
-2026-07-24) — the exact capability this issue asked for. It wasn't visible
-in the earlier research because `gix` 0.86.0 was published to crates.io on
-2026-07-23, **one day before** the fix landed; it exists on upstream `main`
-but isn't in any released crate yet. Verified directly against gitoxide's
-own test suite (`gix/tests/gix/clone.rs`,
-`fetch_specific_revision_bare_and_shallow` and
+via PR [#2824](https://github.com/GitoxideLabs/gitoxide/pull/2824) on
+2026-08-05 — the exact capability this issue asked for. (The commit's own
+message cites `#1930`, but that's the *issue* it closes, not the PR; the
+commit's author-date, 2026-07-24, is also earlier than its actual merge —
+confirm both via `gh api` before citing either elsewhere.) It wasn't
+visible in the earlier research because `gix` 0.86.0 was published to
+crates.io on 2026-07-23, **13 days before** the fix merged; as of
+2026-08-06 it exists on upstream `main` only, not in any released crate.
+Verified directly against gitoxide's own test suite
+(`gix/tests/gix/clone.rs`, `fetch_specific_revision_bare_and_shallow` and
 `fetch_and_checkout_specific_revision`) that `with_revision()` accepts a
-full object-id (not just `HEAD`/a full ref name), composes with
-`with_shallow(Shallow::DepthAtRemote(1))` to actually produce a shallow
-clone (`repo.is_shallow() == true`), detaches `HEAD` at the requested
-commit, and creates no ordinary refs or persisted fetch refspec — the same
-code path handles a ref name or a hex object-id identically.
+full object-id (not just `HEAD`/a full ref name), and separately that
+`with_shallow(Shallow::DepthAtRemote(1))` composes with it to actually
+produce a shallow clone (`repo.is_shallow() == true`, detached `HEAD`, no
+ordinary refs or persisted fetch refspec) — but see the caveat below,
+these two are not exercised *together* in any upstream test.
 
-**One caveat, unverified upstream:** the object-id test case there uses a
-branch tip's SHA over a local test-fixture transport, not an arbitrary
-non-tip commit over a real network remote. This should still work against
-GitHub (which advertises `allowReachableSHA1InWant`, i.e. permits `want`
-for any object reachable from an advertised ref, not just tips) since the
-code path is agnostic to how the revision was sourced — but it hasn't been
-exercised end-to-end against a real remote for a non-tip commit. Revisit
-only if that turns out to matter in practice.
+**Two caveats, unverified upstream — confirm before relying on this in
+automaton:**
+
+- **No upstream test covers object-id + shallow together.**
+  `fetch_specific_revision_bare_and_shallow` (the only test using
+  `with_shallow`) passes a ref name (`"refs/heads/a"`), not a SHA.
+  `fetch_and_checkout_specific_revision` has the object-id case but never
+  combines it with `with_shallow`. The code path is the same regardless of
+  how `revision` was sourced, so this should work, but it's inferred, not
+  directly tested upstream — worth a quick smoke test before depending on
+  it.
+- The object-id test case there also uses a branch tip's SHA over a local
+  test-fixture transport, not an arbitrary non-tip commit over a real
+  network remote. This should still work against GitHub (which advertises
+  `allowReachableSHA1InWant`, i.e. permits `want` for any object reachable
+  from an advertised ref, not just tips) — but it hasn't been exercised
+  end-to-end against a real remote for a non-tip commit either.
 
 **What this means for the parent issue** (`script_ref`-driven
-content-addressed clone cache in automaton): point automaton's `Cargo.toml`
-at a git dependency on `GitoxideLabs/gitoxide` pinned to commit
-`b1174b69b60b478be24f0b81787e95ac08564e7e` (or later, or the next crates.io
-release once one ships that includes it — check `with_revision` exists on
-`PrepareFetch` before bumping), and use:
+content-addressed clone cache in automaton — tracked as
+`issue-019f2414-5b0d-74d0-9156-66dabfca369a-use-git-ref-from-task-created.md`
+in the *automaton* repo's own `issues/`, not in this `nqaf` repo): point
+automaton's `Cargo.toml` at a git dependency on `GitoxideLabs/gitoxide`
+pinned to commit `b1174b69b60b478be24f0b81787e95ac08564e7e` (or later, or
+the next crates.io release once one ships that includes it — check
+`with_revision` exists on `PrepareFetch` before bumping), and use:
 
 ```rust
-let repo = gix::clone::PrepareFetch::new(url, path, gix::create::Kind::Bare, Default::default(), open_opts)?
+let (repo, _outcome) = gix::clone::PrepareFetch::new(url, path, gix::create::Kind::Bare, Default::default(), open_opts)?
     .with_revision(Some(sha.to_string()))?
     .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(1.try_into()?))
     .fetch_only(gix::progress::Discard, &should_interrupt)?;
 ```
 
+(`fetch_only` returns `(Repository, fetch::Outcome)`, matching upstream's
+own tests — don't bind the tuple directly to a single `repo` variable.)
+
 This shallow-fetches exactly `sha`, detaches `HEAD` at it, and persists no
 tracking ref or fetch refspec — no fork, no patch, no `nqaf` prompt
-required. The `gitoxide/` fork-dir drafted while investigating this (and
-the `earlye-forks/gitoxide` GitHub repo created to hold it) have been
-removed/should be deleted as unnecessary.
+required, **once the two caveats above are confirmed**. The `gitoxide/`
+fork-dir drafted while investigating this has been removed from this repo
+(`git rm -r gitoxide/`). The `earlye-forks/gitoxide` GitHub repo created to
+hold it still exists as of this writing and needs manual deletion — see
+Next steps below.
 
 The rest of this file below is kept as the historical record of the
 investigation that led here (initial report, root-cause dig against the
 stale 0.85.0 source, and the grill that refined the now-superseded fork
-plan before this was found).
+plan before this was found) — **it is superseded by the Resolution above
+and no longer reflects current fact** (in particular, "no merged fix as of
+that discussion" in Context, below, is no longer true; it was true only as
+of the 0.85.0-era research, before PR #2824 merged).
 
 ## Context
 
@@ -145,15 +167,25 @@ targets the exact codebase under patch, the SHA is permanently immutable
 `allowReachableSHA1InWant` negotiation against GitHub's actual server
 end-to-end rather than a synthetic local repo.
 
-## Next steps (superseded — see Resolution above)
+## Live next steps
 
-- ~~Create the `earlye-forks/gitoxide` repo on GitHub~~ — done, then found
-  unnecessary; **needs manual deletion** (the `gh` token used in this
-  session lacked `delete_repo` scope).
+- [ ] **Delete the `earlye-forks/gitoxide` GitHub repo** — created during
+  this investigation, then found unnecessary. Still exists as of this
+  writing; the `gh` token used in this session lacked `delete_repo` scope,
+  so this needs a human (or a re-authed token) to run
+  `gh repo delete earlye-forks/gitoxide --yes`.
+- [ ] Confirm the two caveats in the Resolution section above (object-id +
+  shallow together; non-tip SHA over a real remote) before automaton
+  depends on this.
+- [ ] Bump automaton's `gix` dependency per the Resolution section above,
+  once `script_ref` wiring is ready for it.
+
+### Superseded next steps (historical — the fork was abandoned)
+
+- ~~Create the `earlye-forks/gitoxide` repo on GitHub~~ — see live next
+  steps above; done, then found unnecessary.
 - ~~Set up the `nqaf` fork-dir at `gitoxide/`~~ — done, then reverted
   (`git rm -r gitoxide/`) once `with_revision()` was found upstream.
-- Actual remaining step: bump automaton's `gix` dependency per the
-  Resolution section above, once `script_ref` wiring is ready for it.
 
 ## Grill Log
 
@@ -188,8 +220,7 @@ end-to-end rather than a synthetic local repo.
 Self-review of the drafted `gitoxide/prompts/feature-001.md` (via
 `pr-review-toolkit:code-reviewer`) found that upstream gitoxide had already
 merged `PrepareFetch::with_revision()` — the exact fix this prompt asked a
-future agent to build — one day after the crates.io release this issue's
-research had checked. Independently verified against gitoxide's own test
+future agent to build. Independently verified against gitoxide's own test
 suite that `with_revision()` + `with_shallow()` produces a real shallow
 clone of an arbitrary commit SHA with a detached HEAD. Reverted course:
 deleted the `gitoxide/` fork-dir, asked the user to confirm before treating
@@ -197,3 +228,14 @@ this as settled, then — per direction — dropped the fork entirely,
 attempted (partially blocked on `gh` token scope) to delete the
 `earlye-forks/gitoxide` repo, and wrote the Resolution section above for
 whoever wires up `script_ref` in automaton.
+
+A second review pass (same agent, against the final diff) caught two more
+issues in that Resolution section, now fixed: it cited the wrong PR number
+and merge date for the upstream fix (the commit message references issue
+`#1930`, not the actual merging PR `#2824`; the commit's *author* date,
+2026-07-24, isn't its merge date, 2026-08-05 — so gix 0.86.0 predates the
+fix by 13 days, not 1), the code sample didn't compile (`fetch_only`
+returns a `(Repository, Outcome)` tuple, not a bare `Repository`), and it
+missed that no upstream test actually combines the object-id and shallow
+paths together (only each individually) — now called out as a caveat to
+confirm before automaton depends on it.
