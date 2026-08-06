@@ -78,11 +78,31 @@ let repo = gix::clone::PrepareFetch::new(url, path, kind, opts, open_opts)?
     .fetch_only(progress, &should_interrupt)?;
 ```
 
+### Test strategy: pin gitoxide's own root commit as the fixture
+
+Regression test shallow-fetches `c3d319f2b3076a0bb169bcd8a7b6a011f6aba9a5`
+(gitoxide's actual root commit, confirmed via GitHub API: 2018-06-07,
+"Initial commit - based on standard project template", 9 small files —
+`README.md`, `Cargo.toml`, a `Makefile`, one `src/main.rs`, no prior
+history) from the real upstream `GitoxideLabs/gitoxide` remote. Assert the
+fetch succeeds, HEAD ends up detached at that SHA, and only that one commit
+(not the full 16000+ commit history) was transferred. Meta but fitting: it
+targets the exact codebase under patch, the SHA is permanently immutable
+(nothing can rewrite a public root commit), and it exercises the real
+`allowReachableSHA1InWant` negotiation against GitHub's actual server
+end-to-end rather than a synthetic local repo.
+
 ## Next steps
 
-- Set up the `nqaf` fork-dir (`upstream.txt` → `GitoxideLabs/gitoxide`,
-  `fork.txt` → the `earlye-forks` fork) and an initial prompt implementing
-  `with_object_id()` per the API shape above.
+- Create the `earlye-forks/gitoxide` repo on GitHub (empty — confirmed via
+  `gh repo view` that it doesn't exist yet). Blocks `scripts/mirror`, which
+  needs an existing remote to push `--mirror` into.
+- Set up the `nqaf` fork-dir at `gitoxide/` (matches the existing
+  obscura/postgresparser convention of naming the dir after the upstream
+  repo, not the crate) — `upstream.txt` → `GitoxideLabs/gitoxide`,
+  `fork.txt` → `earlye-forks/gitoxide` — and an initial
+  `prompts/feature-000.md` implementing `with_object_id()` per the API
+  shape and test strategy above.
 
 ## Grill Log
 
@@ -99,3 +119,15 @@ let repo = gix::clone::PrepareFetch::new(url, path, kind, opts, open_opts)?
   `with_object_id()` method, mutually exclusive with `with_ref_name()`;
   `fetch_only()` branches early to a want-negotiation path that skips
   `find_custom_refname()` and writes a detached HEAD.
+- Q: Fork-dir name — `gitoxide/` (matches upstream repo name convention) or
+  `gix/` (matches the crate name)? — A: `gitoxide/`, consistent with how
+  obscura/postgresparser/md2confluence-mcp are all named after the upstream
+  repo.
+- Q: Should creating the not-yet-existing `earlye-forks/gitoxide` GitHub
+  repo be tracked as an explicit next step? — A: Yes, added as a step
+  blocking `scripts/mirror`.
+- Q: What should the `with_object_id()` regression test target — a real
+  remote or a local bare repo spun up in-process? — A: User proposed
+  testing against gitoxide's own history directly. Confirmed via GitHub API
+  that its root commit is `c3d319f2b3076a0bb169bcd8a7b6a011f6aba9a5` (tiny,
+  immutable) — pinned that exact SHA as the fixture.
