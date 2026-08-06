@@ -26,7 +26,7 @@ these two are not exercised *together* in any upstream test.
 automaton:**
 
 - **No upstream test covers object-id + shallow together.**
-  `fetch_specific_revision_bare_and_shallow` (the only test using
+  `fetch_specific_revision_bare_and_shallow` (the only *revision* test using
   `with_shallow`) passes a ref name (`"refs/heads/a"`), not a SHA.
   `fetch_and_checkout_specific_revision` has the object-id case but never
   combines it with `with_shallow`. The code path is the same regardless of
