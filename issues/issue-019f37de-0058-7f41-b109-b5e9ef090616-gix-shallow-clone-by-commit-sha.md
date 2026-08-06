@@ -94,15 +94,22 @@ end-to-end rather than a synthetic local repo.
 
 ## Next steps
 
-- Create the `earlye-forks/gitoxide` repo on GitHub (empty — confirmed via
-  `gh repo view` that it doesn't exist yet). Blocks `scripts/mirror`, which
-  needs an existing remote to push `--mirror` into.
-- Set up the `nqaf` fork-dir at `gitoxide/` (matches the existing
+- [x] Create the `earlye-forks/gitoxide` repo on GitHub (public, matching
+  `earlye-forks/obscura`'s visibility) — done, empty and ready for
+  `scripts/mirror` to push `--mirror` into.
+- [x] Set up the `nqaf` fork-dir at `gitoxide/` (matches the existing
   obscura/postgresparser convention of naming the dir after the upstream
   repo, not the crate) — `upstream.txt` → `GitoxideLabs/gitoxide`,
-  `fork.txt` → `earlye-forks/gitoxide` — and an initial
-  `prompts/feature-000.md` implementing `with_object_id()` per the API
-  shape and test strategy above.
+  `fork.txt` → `earlye-forks/gitoxide`, `prompts/feature-000.md` (bootstrap
+  README notice, following the obscura convention) and
+  `prompts/feature-001.md` (the actual `with_object_id()` fix, per the API
+  shape and test strategy above) — done.
+- Remaining, left for the user to trigger explicitly (per this repo's own
+  README, mirror/apply are manual human-triggered steps, not automated
+  here): run `scripts/mirror gitoxide` to seed the fork, then
+  `scripts/apply gitoxide <branch>` to have an agent apply
+  `feature-000`/`feature-001` against it and open a PR on
+  `earlye-forks/gitoxide`.
 
 ## Grill Log
 
