@@ -34,11 +34,11 @@ a manual, human-triggered maintenance step: run it yourself when you want to
 set up or refresh a fork.
 
 1. **`scripts/mirror <fork-dir>`** — one-time setup for a brand-new fork.
-   Does a `git clone --mirror` of upstream and `push --mirror`s it straight
-   to the fork remote, so the fork starts as an exact copy of upstream before
-   any prompts exist or have been applied. Only re-run this if you want to
-   hard-reset the fork remote back to a raw upstream mirror (destructive —
-   it overwrites the fork remote's history).
+   Runs `gh repo fork` on upstream, naming/owning the result to match
+   `fork.txt`, so the fork remote is created as an exact copy of upstream
+   before any prompts exist or have been applied. Requires `gh` installed
+   and authenticated. Since this only creates the fork, it's a no-op (gh
+   just reports the fork already exists) if run again later.
 
 2. **`scripts/apply [--engine claude|oneclaw] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
    — clones the fork remote into `<fork-dir>/work` if needed, then checks out
@@ -78,11 +78,11 @@ set up or refresh a fork.
    you know upstream has new commits you want).
 
 **`apply` commits and pushes after every prompt, and opens a PR via `gh`.**
-`mirror` and `re-apply` do not — they always leave `<fork-dir>/work` as a
-dirty working tree for you to review, commit, and push yourself. `gh` needs
-to be installed and authenticated against the fork's GitHub repo for PR
-creation to happen; if it isn't, `apply` still does the commit/push part and
-just skips opening a PR.
+`re-apply` does not — it always leaves `<fork-dir>/work` as a dirty working
+tree for you to review, commit, and push yourself. `mirror` doesn't touch
+`work/` at all; it just creates the fork remote via `gh repo fork`, so `gh`
+installed and authenticated is required for that step (unlike `apply`'s PR
+creation, which is skipped rather than required if `gh` isn't available).
 
 ## Quick reference
 
