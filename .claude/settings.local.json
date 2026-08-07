@@ -7,7 +7,9 @@
       "Read(//Users/earlye/Documents/github.com/earlye/dotclaude/**)",
       "Read(//Users/earlye/**)",
       "Read(//Users/earlye/.claude/**)",
-      "Bash(git -C /Users/earlye/Documents/github.com/earlye/nqaf status)"
+      "Bash(git -C /Users/earlye/Documents/github.com/earlye/nqaf status)",
+      "Bash(sort -u -t/ -k3)",
+      "Bash(grep -rEo \"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}\" . --exclude-dir=.git)"
     ]
   }
 }
