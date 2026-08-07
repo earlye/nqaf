@@ -1,4 +1,4 @@
-# Fix: expose `obscura-browser::Page::id` through the public `obscura` facade
+# Fix: Provide native rust events for dom changes
 
 ## Problem [feature-011]
 
@@ -47,3 +47,7 @@ Obscura's performance-first architecture:
 Ensure all additions conform to Obscura's existing crate layout, avoid
 introducing blocking locks inside `#[op]` macros, and pass `cargo
 clippy` guidelines.
+
+Update the fork README to include a subsection in "About this fork"
+called "Fork Features", and a subsection underneath that describing
+this feature and how to use it.

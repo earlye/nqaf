@@ -67,8 +67,8 @@ for prompt in "${prompts[@]}"; do
   prompt_name="$(basename "$prompt")"
   marker="$WORK_DIR/.nqaf/prompts/$prompt_name"
 
-  if [ -f "$marker" ]; then
-    echo "Skipping $prompt_name (already recorded in .nqaf/prompts/)"
+  if [ -f "$marker" ] && cmp -s "$prompt" "$marker"; then
+    echo "Skipping $prompt_name (unchanged since last run; recorded in .nqaf/prompts/)"
     continue
   fi
 
