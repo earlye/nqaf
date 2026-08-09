@@ -35,3 +35,7 @@ Please:
   (reqwest/mod.rs) as-is — it operates on a per-request Request built
   after the client, and can't set a client-wide timeout, so it's not a
   substitute for #1/#2.
+
+  4. Update the README.md to include a subsection (if not present) of
+  the "About this Fork" for "Fork Features," and a subsection of "Fork
+  Features" for the timeout settings.
