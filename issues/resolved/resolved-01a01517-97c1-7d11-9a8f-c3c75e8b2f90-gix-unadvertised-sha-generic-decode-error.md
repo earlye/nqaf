@@ -1,5 +1,25 @@
 # gix: shallow fetch by an unadvertised commit SHA fails with generic "Could not decode server reply" instead of a clear "unknown revision" error
 
+## Resolution
+
+Root-caused during implementation (not just the reporter's unconfirmed
+hypothesis): `gix-protocol/src/fetch/error.rs`'s `FetchResponse` variant
+has a **fixed** `#[error("Could not decode server reply")]` string on a
+`#[from] crate::fetch::response::Error` field, discarding whatever
+specific detail the wrapped `response::Error` actually carried — including,
+in many cases, the literal text of a server-sent `ERR` line (confirmed via
+gitoxide's own existing test, `fetch_with_err_response()`). Fixed as
+`gitoxide/prompts/feature-002.md`, an `nqaf` prompt (not a direct code
+change in this repo — see the `nqaf` root `README.md` for why): it changes
+that one variant to `#[error("Could not decode server reply: {0}")]`, so
+callers who print the top-level `fetch::Error` now see the real reason
+instead of the generic string. No new public error variant (e.g. a
+`ServerRejected` variant, as originally asked for below) was needed — the
+existing `response::Error` variants already carried the detail; the bug
+was purely that the outer wrapper threw it away.
+
+The rest of this file is the original report.
+
 ## Context
 
 `gix` 0.86.0, via fork `https://github.com/earlye-forks/gitoxide` rev
