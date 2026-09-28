@@ -428,3 +428,12 @@ Elsewhere:
   unrelated ones behind many, and neither is expected. Treat it as a
   fork **IO extension**, track it as one, and revisit the hop design if
   the set of extensions grows.
+- Q: Where do the ADR, the extension tracking and the glossary go? —
+  A: Under a new `turso/` fork dir, which this work creates anyway:
+  `turso/docs/adr/0001-io-extensions-are-required-trait-methods.md`,
+  `turso/io-extensions.md` (the list of extensions) and
+  `turso/CONTEXT.md`. ADRs are also copied into the fork
+  (`github.com/earlye-forks/turso`) at `docs/adr/`. Prompts are
+  self-contained, so the prompt that introduces an ADR's subject
+  carries the ADR text for the fork. The nqaf copy is the source of
+  truth.
