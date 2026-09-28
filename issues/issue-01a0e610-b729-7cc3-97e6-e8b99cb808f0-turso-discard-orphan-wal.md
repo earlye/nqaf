@@ -70,13 +70,35 @@ if( isWal ){
 }
 ```
 
-That reading has not been checked against a real SQLite **run**. Doing
-that is part of this work (see Next steps). The run should also answer
-two questions:
+Observed on 2026-09-28 against SQLite 3.40.0 (system Python) and
+3.46.0 (built from the amalgamation above). Both gave the same results.
+The setup was a self-consistent WAL holding tables `old_t` and `old_u`,
+with no `-shm`. The WAL check runs on the first read, not on open.
 
-- Does "zero pages" mean exactly "absent or 0 bytes"? `pagerPagecount`
-  rounds a partial page up, so a 1-byte file should count as one page.
-- Does SQLite delete the WAL on a read-only open too, or leave it?
+| db file | open mode | result |
+|---|---|---|
+| absent | read-write | 0-byte db created, WAL deleted, schema `[]` |
+| 0 bytes | read-write | WAL deleted, schema `[]` |
+| 1 byte | read-write | WAL deleted, schema `[]` |
+| 0 bytes | read-only | WAL deleted, even though the open is read-only |
+| absent | read-only | open fails with `CANTOPEN`, WAL untouched |
+| 0 bytes, stale `-shm` present | read-write | WAL deleted, `-shm` kept |
+
+The source agrees:
+
+- `pagerOpenWalIfPresent` guards the delete only on `!tempFile`
+  (`sqlite3.c:60441`). It does not check read-only state.
+- `pagerPagecount` (`:60376`) rounds a partial page up (`:60402`). But
+  the unix VFS reports a 1-byte file as 0 bytes (`unixFileSize`,
+  `:42247`, Ticket #3260, an OS-X msdos workaround). So "zero pages"
+  means 0 or 1 bytes on unix, and a 2-byte to page-size file counts as
+  one page. That last case comes from reading the code, not a run.
+- After a `BEGIN; CREATE TABLE z(q); ROLLBACK;` and a reopen, every
+  read-write case still shows schema `[]`, and `integrity_check` is
+  `ok`.
+
+The script and case dirs were in this session's scratchpad
+(`sqlite-orphan-wal/t.py`), which is not kept.
 
 ### Why event-sorcerer needs it (blocking)
 
@@ -113,8 +135,9 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   `File::truncate` (`io/mod.rs:198`). Which one matches SQLite's
   delete, and is safe beside the multiprocess-WAL/`.tshm` coordination
   path (`host_shared_wal`), is for the implementer to settle.
-- `ReadOnly` opens: follow whatever SQLite is observed to do, and
-  record it.
+- `ReadOnly` opens: SQLite deletes the WAL on a read-only open of a
+  0-byte db (see "What SQLite does"). Whether turso matches that is
+  an open grill question.
 - When the option is off, behaviour is byte-for-byte unchanged.
 - Add a regression test in the fork's own test suite (nqaf convention:
   prompts carry their own regression test, as in
@@ -216,10 +239,8 @@ Expect that gate to be slow or noisy for this fork.
 
 ## Next steps
 
-- [ ] Run a real SQLite build (for example the `sqlite3` CLI or
-  `rusqlite` with `bundled`) against the same orphan-WAL setup, to
-  confirm the source reading above. Check absent and 0-byte db files,
-  a 1-byte db file, and read-only opens.
+- [x] Run a real SQLite build against the same orphan-WAL setup. Done
+  on 2026-09-28; the results are under "What SQLite does".
 - [ ] Wire `turso/` into nqaf (see "Landing it through nqaf").
 - [ ] Write the prompt, with its regression test.
 - [ ] Apply it, bump event-sorcerer's turso pin, and add the
