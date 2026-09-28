@@ -194,7 +194,14 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
     reserved bytes 72-91 being zero. Page 1 is the only page that
     identifies itself. Without it, nothing else in the file can be
     reached, so "zero valid pages" and "invalid page 1" are the same
-    rule. **`InvalidHeader` depends on page-1 durability** (see below).
+    rule. On a read-write open, `InvalidHeader` **truncates both the
+    db file and the WAL to 0** and fsyncs them. The db is then an
+    ordinary empty db (`init_page_1`), and the open succeeds. Either
+    truncation order converges: a crash between the two leaves a state
+    the next open finishes. On a `ReadOnly` open, a db with an invalid
+    header **fails to open**, whatever `read_only` is set to, because
+    read-only means no modifications.
+    **`InvalidHeader` depends on page-1 durability** (see below).
     If page 1 is zeroed after a power loss, or corrupted, and the WAL
     holds a good page 1, the WAL could have recovered the db.
     `InvalidHeader` deletes it, so it is only safe once a zeroed page 1
@@ -460,3 +467,8 @@ Elsewhere:
   `Exclusive`, and otherwise fail the open. Legacy mode needs no extra
   check. `ReadOnlyOrphanWal::Delete` truncates too, and fails loudly
   if the WAL can't be written.
+- Q: After `InvalidHeader` discards the WAL, the db file is still
+  garbage. Should the open fail, or should the db be reinitialised? —
+  A: On a read-write open, truncate both the db file and the WAL, which
+  leaves an empty db. On a read-only open, fail. Read-only means no
+  modifications.
