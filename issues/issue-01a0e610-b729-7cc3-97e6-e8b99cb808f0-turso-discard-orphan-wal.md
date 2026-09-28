@@ -234,7 +234,11 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   modify anything**, so there is no `Delete`. SQLite does delete the
   WAL on a read-only open (see "What SQLite does"), and this is a
   deliberate difference from it. The next read-write open discards the
-  WAL. event-sorcerer is expected to use `Discard { read_only: Ignore }`.
+  WAL. event-sorcerer starts with
+  `Discard { empty: ZeroBytes, read_only: Ignore }`. A wipe that deletes
+  or truncates the db then reads as empty, and a zeroed or garbage db
+  fails on its header instead of coming back as `Created` (ADR 0007).
+  It switches only if it sees a compelling reason.
 - **Page-1 durability under `Discard`.** Under any `Discard` value,
   `allocate_page1` fsyncs the db file after writing page 1, before the
   first WAL frame is written. When it has just created the db file, it
@@ -477,3 +481,7 @@ Elsewhere:
   copied from SQLite, and turso has never had it, so it goes:
   `ReadOnlyOrphanWal { Ignore, Replay }`. (The Q2 and Q3 entries above
   list `Delete`, which is what was believed at that point.)
+- Q: Which `empty` rule should event-sorcerer use? — A: Start with
+  `ZeroBytes`, and switch only for a compelling reason.
+  `InvalidHeader` would reinitialise a damaged member, which would then
+  look `Created`.
