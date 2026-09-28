@@ -166,26 +166,48 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
 
   ```rust
   enum OrphanWalPolicy {
-      Replay,                                    // default; upstream behaviour
-      Discard { read_only: ReadOnlyOrphanWal },  // read-write opens delete the WAL
+      Replay,                           // default; upstream behaviour
+      Discard {                         // read-write opens discard the WAL
+          empty: EmptyDb,
+          read_only: ReadOnlyOrphanWal,
+      },
   }
+  enum EmptyDb { ZeroBytes, OneByte, InvalidHeader }
   enum ReadOnlyOrphanWal { Delete, Ignore, Replay }
   ```
 
   The default is `Replay`. A nested enum means combinations that make
   no sense can't be written. Read-write opens have no `Ignore` choice
   on purpose: keeping the old WAL file while writing new frames would
-  mean resetting its header safely, and deleting the file avoids that.
-- Under `Discard`, on a read-write open, when the db file has zero pages (it did not
-  exist, or `db_size == 0`, which is exactly when `init_page_1` is
-  installed at `lib.rs:730-736`), discard `{name}-wal` before the
+  mean resetting its header safely, and discarding the file avoids that.
+- `empty` decides which db files count as empty. Each value includes
+  the ones before it:
+  - `ZeroBytes`: the file is absent or 0 bytes. This is exactly when
+    `init_page_1` is installed (`lib.rs:730-736`).
+  - `OneByte`: also a 1-byte file. This copies what SQLite's unix VFS
+    does (see "What SQLite does").
+  - `InvalidHeader`: also any file whose page 1 is not a valid header.
+    That means it is shorter than 100 bytes, or the header fails a
+    check: the magic string `"SQLite format 3\0"`, the page size (a
+    power of two from 512 to 32768, or 1), the payload fractions
+    64/32/32, the schema format (1-4), the text encoding (1-3), or the
+    reserved bytes 72-91 being zero. Page 1 is the only page that
+    identifies itself. Without it, nothing else in the file can be
+    reached, so "zero valid pages" and "invalid page 1" are the same
+    rule. **`InvalidHeader` depends on page-1 durability** (see below).
+    If page 1 is zeroed after a power loss, or corrupted, and the WAL
+    holds a good page 1, the WAL could have recovered the db.
+    `InvalidHeader` deletes it, so it is only safe once a zeroed page 1
+    cannot hide committed frames.
+- Under `Discard`, on a read-write open, when the db file counts as
+  empty under `empty`, discard `{name}-wal` before the
   `OpenWal` scan instead of replaying it. Go through the supplied `IO`,
   not `std::fs`: event-sorcerer hosts may supply non-filesystem IOs.
   `IO::remove_file` exists (`io/mod.rs:374`), and so does
   `File::truncate` (`io/mod.rs:198`). Which one matches SQLite's
   delete, and is safe beside the multiprocess-WAL/`.tshm` coordination
   path (`host_shared_wal`), is for the implementer to settle.
-- Under `Discard`, a `ReadOnly` open of a zero-page db follows
+- Under `Discard`, a `ReadOnly` open of an empty db follows
   `read_only`. `Delete` removes the WAL, as SQLite does (see "What
   SQLite does"). `Ignore` doesn't scan or attach it, and leaves the
   file. `Replay` does what upstream does today. event-sorcerer is
@@ -355,3 +377,12 @@ Elsewhere:
   read_only: ReadOnlyOrphanWal { Delete, Ignore, Replay } } }`, set
   with `with_orphan_wal_policy`. Read-write opens have no `Ignore`
   choice.
+- Q: What counts as "zero pages"? The recommendation was absent or 0
+  bytes, not SQLite's 1-byte quirk. The user suggested "zero valid
+  pages" instead. — A: We went through the format. Only page 1
+  identifies itself, through its 100-byte header, so "zero valid pages"
+  means "invalid page 1". The risk is that a WAL beside a torn or
+  zeroed page 1 may be the only way to recover the db. The decision is
+  to make it configurable, with `Discard { empty: EmptyDb { ZeroBytes,
+  OneByte, InvalidHeader }, .. }`, each value including the ones before
+  it. `InvalidHeader` depends on the page-1 durability fix.
