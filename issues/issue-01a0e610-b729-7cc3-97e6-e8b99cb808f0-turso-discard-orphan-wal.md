@@ -212,7 +212,35 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   SQLite does"). `Ignore` doesn't scan or attach it, and leaves the
   file. `Replay` does what upstream does today. event-sorcerer is
   expected to use `Discard { read_only: Ignore }`.
-- Under `Replay`, behaviour is byte-for-byte unchanged.
+- **Page-1 durability under `Discard`.** Under any `Discard` value,
+  `allocate_page1` fsyncs the db file after writing page 1, before the
+  first WAL frame is written. When it has just created the db file, it
+  also fsyncs the parent directory. Without this, a power loss right
+  after the db is created can leave a legitimate WAL of committed
+  frames beside a db that is absent, 0 bytes, or has a zeroed page 1,
+  and `Discard` would delete that WAL. The cost is one or two fsyncs
+  per db creation.
+- **The directory sync is a fork IO extension.** It is a new
+  **required** method on the `IO` trait (`io/mod.rs:366`):
+  `sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion>`.
+  `File::sync` (`io/mod.rs:157`) already covers the db file. The
+  method is required, so every IO, including out-of-tree ones like
+  event-sorcerer's, has to decide what it means for them before it
+  compiles.
+  - unix, io_uring, generic-on-unix and `SparseLinuxIo` open the parent
+    directory and fsync it.
+  - memory and memory_yield are a no-op returning `Ok`. Nothing
+    survives a crash there, so there is nothing to make durable.
+  - windows and win_iocp are a no-op returning `Ok`, because NTFS
+    journals metadata. The implementer should confirm this.
+  - `VfsMod`, whose C-ABI extension has no slot for this, and browser
+    `Opfs` return `Unsupported`.
+  - The simulator and test IOs get whichever behaviour fits them.
+  - Opening with `Discard` fails with a clear error when
+    `sync_parent_dir` returns `Unsupported`. It never falls back to a
+    weaker guarantee.
+- Under `Replay`, behaviour is byte-for-byte unchanged, including no
+  extra fsyncs.
 - Add a regression test in the fork's own test suite (nqaf convention:
   prompts carry their own regression test, as in
   `obscura/prompts/feature-010.md`), covering both option states as in
@@ -386,3 +414,17 @@ Elsewhere:
   to make it configurable, with `Discard { empty: EmptyDb { ZeroBytes,
   OneByte, InvalidHeader }, .. }`, each value including the ones before
   it. `InvalidHeader` depends on the page-1 durability fix.
+- Q: Under `Discard`, should page 1 be made durable, with an fsync of
+  the db file and of the parent directory on create, before the first
+  WAL frame? — A: Yes, under every `Discard` value. That makes the
+  `InvalidHeader` dependency true by construction.
+- Q: Directory sync isn't on `IO`. Should it be a provided method with
+  an `Unsupported` default, a required method, or a second interface
+  reached by a hop (COM `QueryInterface`-style, `fn
+  query_interface(&self, iid) -> Option<..>`)? — A: A required method
+  on `IO`. The behaviour is known for every in-tree impl, and a
+  compile error forces out-of-tree IOs to decide. The hop pays off for
+  a set of related capabilities behind one interface, or a set of
+  unrelated ones behind many, and neither is expected. Treat it as a
+  fork **IO extension**, track it as one, and revisit the hop design if
+  the set of extensions grows.
