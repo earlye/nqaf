@@ -281,3 +281,15 @@ Elsewhere:
   `issues/issue-01a0c5c3-e521-73b1-a208-57373c478240-single-turso-db-per-group.md`.
   Its Open path's "Orphan `-wal`" decision and its Acceptance 8 depend
   on this option. It lists this as **Blocked by**.
+
+## Grill Log
+
+### 2026-09-28
+
+- Q: Should the fix be opt-in and fork-only, or should it also be
+  proposed to upstream turso as a default-on SQLite-compat fix? — A:
+  Fork-only for now. Revisiting upstream is tracked as a deferred
+  decision in
+  `issues/issue-01a0e625-0a58-72c2-9ea2-23ae7e65ad07-turso-orphan-wal-upstream.md`.
+  Keep the flag's name and shape compatible with later defaulting to
+  `true`.
