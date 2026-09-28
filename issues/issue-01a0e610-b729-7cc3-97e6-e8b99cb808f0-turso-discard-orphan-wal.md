@@ -123,10 +123,23 @@ were rejected there:
 This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
 "Landing it through nqaf" below.
 
-- Add `DatabaseOpts::with_discard_orphan_wal(bool)`, with a field
-  beside the existing `enable_*` flags (`lib.rs:224-238`, builders
-  `:251-310`). The default is `false`. The exact name is open.
-- When the option is on and the db file has zero pages (it did not
+- Add `DatabaseOpts::with_orphan_wal_policy(OrphanWalPolicy)`, with a
+  field beside the existing `enable_*` flags (`lib.rs:224-238`,
+  builders `:251-310`):
+
+  ```rust
+  enum OrphanWalPolicy {
+      Replay,                                    // default; upstream behaviour
+      Discard { read_only: ReadOnlyOrphanWal },  // read-write opens delete the WAL
+  }
+  enum ReadOnlyOrphanWal { Delete, Ignore, Replay }
+  ```
+
+  The default is `Replay`. A nested enum means combinations that make
+  no sense can't be written. Read-write opens have no `Ignore` choice
+  on purpose: keeping the old WAL file while writing new frames would
+  mean resetting its header safely, and deleting the file avoids that.
+- Under `Discard`, on a read-write open, when the db file has zero pages (it did not
   exist, or `db_size == 0`, which is exactly when `init_page_1` is
   installed at `lib.rs:730-736`), discard `{name}-wal` before the
   `OpenWal` scan instead of replaying it. Go through the supplied `IO`,
@@ -135,11 +148,12 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   `File::truncate` (`io/mod.rs:198`). Which one matches SQLite's
   delete, and is safe beside the multiprocess-WAL/`.tshm` coordination
   path (`host_shared_wal`), is for the implementer to settle.
-- `ReadOnly` opens: the behaviour is set by a three-way enum. Delete
-  the WAL, as SQLite does (see "What SQLite does"). Ignore it: don't
-  scan or attach it, and leave the file. Or replay it, as upstream
-  does today. The API shape is still being grilled.
-- When the option is off, behaviour is byte-for-byte unchanged.
+- Under `Discard`, a `ReadOnly` open of a zero-page db follows
+  `read_only`. `Delete` removes the WAL, as SQLite does (see "What
+  SQLite does"). `Ignore` doesn't scan or attach it, and leaves the
+  file. `Replay` does what upstream does today. event-sorcerer is
+  expected to use `Discard { read_only: Ignore }`.
+- Under `Replay`, behaviour is byte-for-byte unchanged.
 - Add a regression test in the fork's own test suite (nqaf convention:
   prompts carry their own regression test, as in
   `obscura/prompts/feature-010.md`), covering both option states as in
@@ -299,3 +313,8 @@ Elsewhere:
   does; ignore it (don't scan or attach it, and leave the file); or
   replay it, as today. — A: Make it configurable, with an enum holding
   all three choices.
+- Q: Should the API be a bool plus an enum, or one nested enum? — A:
+  One nested enum: `OrphanWalPolicy { Replay (default), Discard {
+  read_only: ReadOnlyOrphanWal { Delete, Ignore, Replay } } }`, set
+  with `with_orphan_wal_policy`. Read-write opens have no `Ignore`
+  choice.

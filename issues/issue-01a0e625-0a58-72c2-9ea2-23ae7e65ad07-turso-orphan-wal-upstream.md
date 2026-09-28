@@ -21,9 +21,9 @@ Reasons to revisit:
   fix is already present makes the prompt a no-op. The opt-in flag and
   the fork-side upkeep can then be retired.
 
-Until then, the flag's name and shape should allow it to default to
-`true` later without surprising callers, as
-`with_discard_orphan_wal(bool)` does.
+The option is `DatabaseOpts::with_orphan_wal_policy(OrphanWalPolicy)`,
+and it defaults to `Replay`. Upstream could later change the default to
+`Discard { read_only: Delete }`, which matches SQLite exactly.
 
 If this goes upstream, the upstream issue can reuse Reproduction steps
 1–5 from the parent issue as its repro. Any GitHub post must carry the
