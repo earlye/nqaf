@@ -203,12 +203,28 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   empty under `empty`, discard `{name}-wal` before the
   `OpenWal` scan instead of replaying it. Go through the supplied `IO`,
   not `std::fs`: event-sorcerer hosts may supply non-filesystem IOs.
-  `IO::remove_file` exists (`io/mod.rs:374`), and so does
-  `File::truncate` (`io/mod.rs:198`). Which one matches SQLite's
-  delete, and is safe beside the multiprocess-WAL/`.tshm` coordination
-  path (`host_shared_wal`), is for the implementer to settle.
+  - **"Discard" means truncating the WAL to 0 and fsyncing it, not
+    unlinking it.** `IO::remove_file` does nothing on the browser IO,
+    while `File::truncate` works on every backend. Checkpoint
+    `TRUNCATE` already resets a WAL this way
+    (`storage/wal.rs:5084-5120`), and turso treats a 0-byte WAL as no
+    WAL (`storage/sqlite3_ondisk.rs:1498`). The file stays in place,
+    unlike SQLite, which deletes it. That difference can't be observed.
+  - Check the `empty` rule again right before truncating, because
+    `db_size` is read in `Database::new` (`lib.rs:715`), which runs
+    before OpenWal.
+  - **Legacy mode** needs no other check, because the exclusive lock on
+    the db file already rules out other processes.
+  - **Multiprocess mode** (`enable_multiprocess_wal`): discard only
+    when the `.tshm` coordination authority, opened in OpenWal at
+    `lib.rs:1976`, reports `Exclusive`, meaning no other process has
+    the db open. If it reports `MultiProcess`, **fail the open with a
+    clear error**. Replaying would bring back the hazard, and
+    truncating would corrupt the other process's view.
 - Under `Discard`, a `ReadOnly` open of an empty db follows
-  `read_only`. `Delete` removes the WAL, as SQLite does (see "What
+  `read_only`. `Delete` truncates the WAL, as above. This matches SQLite's
+  delete, and needs a writable WAL handle, so on a read-only
+  filesystem it fails loudly instead of falling back to `Ignore` (see "What
   SQLite does"). `Ignore` doesn't scan or attach it, and leaves the
   file. `Replay` does what upstream does today. event-sorcerer is
   expected to use `Discard { read_only: Ignore }`.
@@ -437,3 +453,10 @@ Elsewhere:
   self-contained, so the prompt that introduces an ADR's subject
   carries the ADR text for the fork. The nqaf copy is the source of
   truth.
+- Q: How does `Discard` remove the WAL? — A: Truncate it to 0 and
+  fsync it, rather than `remove_file`, which does nothing on the
+  browser IO. Check the empty rule again right before truncating. In
+  multiprocess mode, discard only when the `.tshm` authority reports
+  `Exclusive`, and otherwise fail the open. Legacy mode needs no extra
+  check. `ReadOnlyOrphanWal::Delete` truncates too, and fails loudly
+  if the WAL can't be written.
