@@ -100,6 +100,43 @@ The source agrees:
 The script and case dirs were in this session's scratchpad
 (`sqlite-orphan-wal/t.py`), which is not kept.
 
+### Discard mechanics in turso (source reading, 2026-09-28)
+
+These findings come from reading the fork at `4b59a37`. None of it has
+been run. It feeds into grill questions that are still open.
+
+- **`remove_file` does not work everywhere.** It is `std::fs::remove_file`
+  in unix, io_uring, generic, windows and win_iocp, and a map removal in
+  memory IO. But in the browser IO it does nothing and returns `Ok`
+  (`bindings/javascript/src/browser.rs:155`). `File::truncate`
+  (`io/mod.rs:198`) works on every backend and is Completion-based. It
+  is truly async on io_uring, vfs and browser. Checkpoint `TRUNCATE`
+  already resets a WAL this way, with a truncate to 0 followed by a sync
+  (`storage/wal.rs:5084-5120`).
+- **Legacy mode is safe across processes.** A non-`ReadOnly` open takes
+  an exclusive fcntl lock on the db file.
+- **Multiprocess mode is not safe by default.** When
+  `enable_multiprocess_wal` is set and the IO supports it
+  (`lib.rs:2541-2564`), the db is opened `NoLock` (`lib.rs:840-842`).
+  The `{db}-tshm` authority decides between `Exclusive` and
+  `MultiProcess` open mode with a try-lock on byte 0
+  (`storage/shared_wal_coordination.rs:1057-1080`), and it is opened
+  inside OpenWal (`lib.rs:1976`). If the WAL is truncated or removed
+  while a peer is attached, the peer's committed data is lost or
+  diverges. `db_size` is read in `Database::new` (`lib.rs:715`), which
+  is earlier than OpenWal, so it has to be checked again before
+  discarding.
+- **The in-process registry is safe.** `DATABASE_MANAGER`
+  (`lib.rs:551-588`) returns the existing `Database`, so OpenWal does
+  not run again. The exception is `open_with_flags_bypass_registry*`
+  (`lib.rs:1291,1325`).
+- **After a power loss, a legitimate WAL can sit beside a 0-byte db.**
+  `allocate_page1` writes page 1 to the db file and waits for that
+  write, but does not fsync it (`storage/pager.rs:5232-5239`). WAL
+  commits fsync only the WAL. So if power is lost after the first
+  commit, the db can be 0 bytes while the WAL holds committed frames,
+  and discarding the WAL would lose them.
+
 ### Why event-sorcerer needs it (blocking)
 
 event-sorcerer's per-group open path decides `Created` or `Opened` from
