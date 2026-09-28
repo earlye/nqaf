@@ -23,7 +23,10 @@ Reasons to revisit:
 
 The option is `DatabaseOpts::with_orphan_wal_policy(OrphanWalPolicy)`,
 and it defaults to `Replay`. Upstream could later change the default to
-`Discard { read_only: Delete }`, which matches SQLite exactly.
+`Discard { empty: OneByte, read_only: Ignore }`. That is the closest
+match to SQLite. It differs in one deliberate way: read-only opens
+never modify files, whereas SQLite deletes the WAL even on a read-only
+open.
 
 If this goes upstream, the upstream issue can reuse Reproduction steps
 1–5 from the parent issue as its repro. Any GitHub post must carry the

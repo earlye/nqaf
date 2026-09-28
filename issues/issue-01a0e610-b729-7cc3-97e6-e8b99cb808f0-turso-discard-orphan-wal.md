@@ -173,7 +173,7 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
       },
   }
   enum EmptyDb { ZeroBytes, OneByte, InvalidHeader }
-  enum ReadOnlyOrphanWal { Delete, Ignore, Replay }
+  enum ReadOnlyOrphanWal { Ignore, Replay }
   ```
 
   The default is `Replay`. A nested enum means combinations that make
@@ -229,12 +229,12 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
     clear error**. Replaying would bring back the hazard, and
     truncating would corrupt the other process's view.
 - Under `Discard`, a `ReadOnly` open of an empty db follows
-  `read_only`. `Delete` truncates the WAL, as above. This matches SQLite's
-  delete, and needs a writable WAL handle, so on a read-only
-  filesystem it fails loudly instead of falling back to `Ignore` (see "What
-  SQLite does"). `Ignore` doesn't scan or attach it, and leaves the
-  file. `Replay` does what upstream does today. event-sorcerer is
-  expected to use `Discard { read_only: Ignore }`.
+  `read_only`. `Ignore` doesn't scan or attach the WAL, and leaves the
+  file. `Replay` does what upstream does today. **Read-only opens never
+  modify anything**, so there is no `Delete`. SQLite does delete the
+  WAL on a read-only open (see "What SQLite does"), and this is a
+  deliberate difference from it. The next read-write open discards the
+  WAL. event-sorcerer is expected to use `Discard { read_only: Ignore }`.
 - **Page-1 durability under `Discard`.** Under any `Discard` value,
   `allocate_page1` fsyncs the db file after writing page 1, before the
   first WAL frame is written. When it has just created the db file, it
@@ -472,3 +472,8 @@ Elsewhere:
   A: On a read-write open, truncate both the db file and the WAL, which
   leaves an empty db. On a read-only open, fail. Read-only means no
   modifications.
+- Q: Given that read-only means no modifications, should
+  `ReadOnlyOrphanWal::Delete` stay? — A: No. It was our proposal,
+  copied from SQLite, and turso has never had it, so it goes:
+  `ReadOnlyOrphanWal { Ignore, Replay }`. (The Q2 and Q3 entries above
+  list `Delete`, which is what was believed at that point.)
