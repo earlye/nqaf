@@ -135,9 +135,10 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   `File::truncate` (`io/mod.rs:198`). Which one matches SQLite's
   delete, and is safe beside the multiprocess-WAL/`.tshm` coordination
   path (`host_shared_wal`), is for the implementer to settle.
-- `ReadOnly` opens: SQLite deletes the WAL on a read-only open of a
-  0-byte db (see "What SQLite does"). Whether turso matches that is
-  an open grill question.
+- `ReadOnly` opens: the behaviour is set by a three-way enum. Delete
+  the WAL, as SQLite does (see "What SQLite does"). Ignore it: don't
+  scan or attach it, and leave the file. Or replay it, as upstream
+  does today. The API shape is still being grilled.
 - When the option is off, behaviour is byte-for-byte unchanged.
 - Add a regression test in the fork's own test suite (nqaf convention:
   prompts carry their own regression test, as in
@@ -293,3 +294,8 @@ Elsewhere:
   `issues/issue-01a0e625-0a58-72c2-9ea2-23ae7e65ad07-turso-orphan-wal-upstream.md`.
   Keep the flag's name and shape compatible with later defaulting to
   `true`.
+- Q: When the option is on, what should a read-only open of a zero-page
+  db with an orphan WAL do? The choices were: delete it, as SQLite
+  does; ignore it (don't scan or attach it, and leave the file); or
+  replay it, as today. — A: Make it configurable, with an enum holding
+  all three choices.
