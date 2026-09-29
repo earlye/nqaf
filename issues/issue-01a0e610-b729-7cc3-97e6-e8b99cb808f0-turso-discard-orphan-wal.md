@@ -514,7 +514,6 @@ Elsewhere:
   `ZeroBytes`, and switch only for a compelling reason.
   `InvalidHeader` would reinitialise a damaged member, which would then
   look `Created`.
-
 - Q: How should Acceptance be split now that the option has more
   settings? — A: The fork-side regression test covers the full matrix
   of settings, including durability (sync calls counted, power loss not
