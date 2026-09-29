@@ -324,26 +324,55 @@ allocated before the first commit. Neither result is an error, and
 
 ## Acceptance
 
-A **turso-conformance claim** in event-sorcerer
-(`/home/ec2-user/event-sorcerer/turso-conformance/tests/`, one claim per
-file, run with `just conformance`; see event-sorcerer's `standards.md`
-"Unverified engine claims go in `turso-conformance`" and ADR 0003),
-covering both option states. nqaf has no conformance-claim convention
-of its own: its prompts carry a regression test inside the fork. So
-this issue asks for both, the fork-side regression test (above) and the
-event-sorcerer claim.
+There are two layers. nqaf has no conformance-claim convention of its
+own; its prompts carry a regression test inside the fork.
 
-- **Option on:** a self-consistent `{name}-wal` beside an absent db,
-  and beside a 0-byte db, is discarded on open. The schema is empty.
-  After `BEGIN; CREATE TABLE z(q); ROLLBACK;` and then a reopen, the old
-  tables stay absent and `integrity_check` is `ok`.
-- **Option off (the control, which must show the hazard):** the same
-  sequence brings the old db back, as in Reproduction steps 4-5. This
-  records upstream behaviour and keeps the option-on half falsifiable,
-  as event-sorcerer's conformance crate requires of every claim.
+### Fork-side regression test (carried in the prompt)
+
+It covers every setting:
+
+1. **`Replay` control:** the resurrection in Reproduction steps 4-5
+   still happens, and no extra fsyncs are issued.
+2. **`ZeroBytes`:** with an orphan WAL beside an absent db, or beside
+   a 0-byte db, the schema is empty. After
+   `BEGIN; CREATE TABLE z(q); ROLLBACK;` and a reopen, the db is still
+   empty and `integrity_check` is `ok`. A 1-byte db is **not** treated
+   as empty.
+3. **`OneByte`:** the 1-byte case is treated as empty too.
+4. **`InvalidHeader`, read-write:** with a 4096-byte zero db and a WAL,
+   both files are truncated, and the open succeeds with an empty db.
+5. **Negative control:** a valid db with its WAL is replayed as usual,
+   under every `empty` rule.
+6. **Read-only:** `Ignore` gives an empty schema, and the WAL's size
+   and contents are unchanged. `Replay` matches upstream. With
+   `InvalidHeader`, the open fails and no file is modified.
+7. **Durability:** under `Discard`, a counting IO sees a db-file sync
+   and a `sync_parent_dir` after `allocate_page1`, before the first
+   WAL write. Copy the `SyncCountingIo` pattern in `vdbe/vacuum.rs`.
+   Power loss itself is not simulated.
+8. **Unsupported IO:** `Discard` on an IO whose `sync_parent_dir`
+   returns `Unsupported` fails at open.
+9. **Multiprocess:** `Discard` fails at open when another process is
+   attached (the `.tshm` authority reports `MultiProcess`).
+
+### event-sorcerer turso-conformance claim
+
+The claim goes in `/home/ec2-user/event-sorcerer/turso-conformance/tests/`,
+one claim per file, run with `just conformance`. See event-sorcerer's
+`standards.md` ("Unverified engine claims go in `turso-conformance`")
+and ADR 0003. It covers only what event-sorcerer relies on:
+
+- **`Discard { empty: ZeroBytes, read_only: Ignore }`:** an orphan WAL
+  beside an absent db, and beside a 0-byte db, is discarded. The schema
+  is empty. After `BEGIN; CREATE TABLE z(q); ROLLBACK;` and a reopen,
+  the old tables stay absent and `integrity_check` is `ok`.
+- **`Replay` control, which must show the hazard:** the same sequence
+  brings the old db back. This records upstream behaviour and keeps the
+  claim falsifiable, as the conformance crate requires of every claim.
 - The claim runs against the fork rev that event-sorcerer's workspace
   `Cargo.lock` pins, per the crate's smoke tier. Landing this therefore
-  also means bumping that pin to the fork commit carrying the patch.
+  also means bumping that pin to the fork commit that carries the
+  patch.
 
 ## Landing it through nqaf
 
@@ -485,3 +514,10 @@ Elsewhere:
   `ZeroBytes`, and switch only for a compelling reason.
   `InvalidHeader` would reinitialise a damaged member, which would then
   look `Created`.
+
+- Q: How should Acceptance be split now that the option has more
+  settings? — A: The fork-side regression test covers the full matrix
+  of settings, including durability (sync calls counted, power loss not
+  simulated), unsupported IO and multiprocess. The event-sorcerer claim
+  covers only `Discard { ZeroBytes, Ignore }` plus the `Replay` hazard
+  control.
