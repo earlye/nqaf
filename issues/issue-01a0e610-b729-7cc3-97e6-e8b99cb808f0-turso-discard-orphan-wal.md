@@ -9,9 +9,12 @@ event-sorcerer as a git dependency, pinned in its `Cargo.lock` at
 The old database then comes back on the next write that allocates page
 1, with every table and row intact and `PRAGMA integrity_check` = `ok`.
 
-Wanted: a `DatabaseOpts` option, **off by default** so upstream behaviour
-is unchanged, that makes open discard `{name}-wal` instead of replaying
-it when the db file has zero pages. SQLite does this.
+Wanted: a `DatabaseOpts` orphan-WAL policy, defaulting to `Replay` so
+upstream behaviour is unchanged. Under `Discard`, open throws away
+`{name}-wal` instead of replaying it when the db file counts as an
+**Empty db** (see `turso/CONTEXT.md`). SQLite does something similar.
+The full design is under "Proposed change". The decisions and the
+rejected alternatives are in the Grill Log.
 
 All turso paths below are relative to `core/` at fork rev `4b59a37`.
 
@@ -103,7 +106,7 @@ The script and case dirs were in this session's scratchpad
 ### Discard mechanics in turso (source reading, 2026-09-28)
 
 These findings come from reading the fork at `4b59a37`. None of it has
-been run. It feeds into grill questions that are still open.
+been run. The decisions based on it are under "Proposed change".
 
 - **`remove_file` does not work everywhere.** It is `std::fs::remove_file`
   in unix, io_uring, generic, windows and win_iocp, and a map removal in
@@ -135,7 +138,8 @@ been run. It feeds into grill questions that are still open.
   write, but does not fsync it (`storage/pager.rs:5232-5239`). WAL
   commits fsync only the WAL. So if power is lost after the first
   commit, the db can be 0 bytes while the WAL holds committed frames,
-  and discarding the WAL would lose them.
+  and discarding the WAL would lose them. The page-1 durability
+  requirement under "Proposed change" closes this gap.
 
 ### Why event-sorcerer needs it (blocking)
 
@@ -147,7 +151,8 @@ as a rolled-back init or a crash, the wiped RAFT member's old db comes
 back, including its old identity and vote. event-sorcerer's ADR 0007
 (`docs/adr/0007-group-creation-requires-peer-agreement.md`) exists to
 prevent exactly this: a damaged member is never recovered in place.
-event-sorcerer will turn the option on in its open path, and also
+event-sorcerer will set `Discard { empty: ZeroBytes, read_only: Ignore }`
+in its open path, and also
 document that wiping a db means wiping its sidecars. Two alternatives
 were rejected there:
 
@@ -201,11 +206,12 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
     the next open finishes. On a `ReadOnly` open, a db with an invalid
     header **fails to open**, whatever `read_only` is set to, because
     read-only means no modifications.
-    **`InvalidHeader` depends on page-1 durability** (see below).
-    If page 1 is zeroed after a power loss, or corrupted, and the WAL
-    holds a good page 1, the WAL could have recovered the db.
-    `InvalidHeader` deletes it, so it is only safe once a zeroed page 1
-    cannot hide committed frames.
+    **`InvalidHeader` depends on page-1 durability** (see below). If
+    page 1 is zeroed after a power loss and the WAL holds a good page 1,
+    replaying the WAL could have recovered the db. The durability
+    requirement applies under every `Discard`, so a zeroed page 1 can
+    never hide committed frames. What remains is real corruption, and
+    `InvalidHeader` deliberately wipes it.
 - Under `Discard`, on a read-write open, when the db file counts as
   empty under `empty`, discard `{name}-wal` before the
   `OpenWal` scan instead of replaying it. Go through the supplied `IO`,
@@ -270,8 +276,18 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   extra fsyncs.
 - Add a regression test in the fork's own test suite (nqaf convention:
   prompts carry their own regression test, as in
-  `obscura/prompts/feature-010.md`), covering both option states as in
-  Acceptance.
+  `obscura/prompts/feature-010.md`), covering the matrix under
+  "Acceptance".
+- Copy `turso/docs/adr/0001-io-extensions-are-required-trait-methods.md`
+  into the fork at `docs/adr/`. Prompts are self-contained, so the
+  prompt carries the ADR text. The nqaf copy is the source of truth.
+- Not settled: `open_with_flags_bypass_registry*` (`lib.rs:1291,1325`)
+  lets a second `Database` in the same process open the same file.
+  fcntl locks don't exclude the same process, so the legacy-mode
+  argument doesn't cover this case. The risk is probably only a
+  zero-page window, because page 1 lands before any WAL frame. The
+  implementer should confirm this, or make `Discard` refuse
+  registry-bypassed opens.
 
 ## Reproduction
 
@@ -376,7 +392,8 @@ and ADR 0003. It covers only what event-sorcerer relies on:
 
 ## Landing it through nqaf
 
-nqaf does not track turso yet. There is no `turso/` fork-dir, and the
+nqaf does not track turso yet. `turso/` so far holds only the grill's
+docs (`CONTEXT.md`, `io-extensions.md` and `docs/adr/0001-*`), and the
 fork at `4b59a37` is a plain upstream merge commit ("Merge 'core/mvcc:
 add tests for speculative checkpoint root mappings…'") with no
 nqaf-applied prompts. event-sorcerer's `standards.md` ("Vendored
@@ -389,7 +406,8 @@ This issue needs that first:
   the fork's README as nqaf-tracked, as in
   `obscura/prompts/feature-000.md`.
 - `turso/prompts/feature-NNN.md`: this fix, then `scripts/apply turso
-  <branch>`.
+  <branch>`. When it lands, update `turso/io-extensions.md` with the
+  prompt name.
 
 `scripts/re-apply` gates its merge on `make test`, and turso's `test`
 target is a large suite (compat, sqlite3, shell, JS and CLI runners).
@@ -422,7 +440,28 @@ Fork `earlye-forks/turso` @ `4b59a37`, `core/`:
   page 1.
 - `storage/pager.rs:5182-5257`: `allocate_page1`, which writes page 1 to
   the db file.
-- `io/mod.rs:198,374`: `File::truncate`, `IO::remove_file`.
+- `io/mod.rs:157,198,366,374`: `File::sync`, `File::truncate`, the
+  `IO` trait (where `sync_parent_dir` goes), and `IO::remove_file`
+  (not used, since it does nothing on the browser IO).
+- `lib.rs:715,1976,2541-2564`: where `db_size` is read, where the
+  `.tshm` authority is opened, and the multiprocess-mode gate.
+- `storage/shared_wal_coordination.rs:1057-1080`: the choice between
+  `Exclusive` and `MultiProcess` open mode.
+- `storage/wal.rs:5084-5120`: checkpoint `TRUNCATE`, the model for
+  truncate plus sync.
+- `vdbe/vacuum.rs` `SyncCountingIo`: the pattern for the durability
+  test.
+- `bindings/javascript/src/browser.rs:155`: the browser
+  `remove_file` that does nothing.
+
+nqaf:
+
+- `turso/CONTEXT.md`: glossary (**Orphan WAL**, **Empty db**,
+  **Orphan WAL policy**, **IO extension**).
+- `turso/docs/adr/0001-io-extensions-are-required-trait-methods.md`.
+- `turso/io-extensions.md`: the list of IO extensions.
+- `issues/issue-01a0e625-0a58-72c2-9ea2-23ae7e65ad07-turso-orphan-wal-upstream.md`:
+  deferred decision on proposing this upstream.
 
 Elsewhere:
 
