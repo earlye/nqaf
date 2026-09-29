@@ -200,7 +200,9 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
     identifies itself. Without it, nothing else in the file can be
     reached, so "zero valid pages" and "invalid page 1" are the same
     rule. On a read-write open, `InvalidHeader` **truncates both the
-    db file and the WAL to 0** and fsyncs them. The db is then an
+    db file and the WAL to 0** and fsyncs them. It truncates the db
+    **whether or not a WAL exists**, so it deliberately wipes a corrupt
+    db. Under `OneByte`, the 1-byte db is truncated to 0 the same way. The db is then an
     ordinary empty db (`init_page_1`), and the open succeeds. Either
     truncation order converges: a crash between the two leaves a state
     the next open finishes. On a `ReadOnly` open, a db with an invalid
@@ -269,9 +271,11 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   - `VfsMod`, whose C-ABI extension has no slot for this, and browser
     `Opfs` return `Unsupported`.
   - The simulator and test IOs get whichever behaviour fits them.
-  - Opening with `Discard` fails with a clear error when
+  - A read-write open with `Discard` of an **empty** db, where a db
+    is about to be created, fails with a clear error when
     `sync_parent_dir` returns `Unsupported`. It never falls back to a
-    weaker guarantee.
+    weaker guarantee. An open of a non-empty db skips the check and
+    pays no directory fsync.
 - Under `Replay`, behaviour is byte-for-byte unchanged, including no
   extra fsyncs.
 - Add a regression test in the fork's own test suite (nqaf convention:
@@ -366,8 +370,9 @@ It covers every setting:
    and a `sync_parent_dir` after `allocate_page1`, before the first
    WAL write. Copy the `SyncCountingIo` pattern in `vdbe/vacuum.rs`.
    Power loss itself is not simulated.
-8. **Unsupported IO:** `Discard` on an IO whose `sync_parent_dir`
-   returns `Unsupported` fails at open.
+8. **Unsupported IO:** on an IO whose `sync_parent_dir` returns
+   `Unsupported`, a read-write `Discard` open of an empty db fails at
+   open, and a non-empty db opens normally.
 9. **Multiprocess:** `Discard` fails at open when another process is
    attached (the `.tshm` authority reports `MultiProcess`).
 
@@ -559,3 +564,20 @@ Elsewhere:
   simulated), unsupported IO and multiprocess. The event-sorcerer claim
   covers only `Discard { ZeroBytes, Ignore }` plus the `Replay` hazard
   control.
+
+### 2026-09-29
+
+These questions came up while the prompt was being written.
+
+- Q: Should `InvalidHeader` also wipe a corrupt db that has no WAL beside
+  it? — A: Yes. Whether a WAL happens to be present shouldn't decide
+  whether a garbage db can be used. The rejected alternative was to
+  reset only when an orphan WAL is present.
+- Q: When should `Discard` check whether `sync_parent_dir` is
+  supported? — A: Only on a read-write open of an empty db, which is
+  the only time a db is about to be created. The rejected alternative
+  was every `Discard` open, which costs a directory fsync per open.
+- Q: Under `OneByte`, should a read-write open truncate the 1-byte db
+  to 0? — A: Yes.
+- An **orphan WAL** is a `-wal` of nonzero length. turso already treats
+  a 0-byte WAL as no WAL.

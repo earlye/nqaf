@@ -6,7 +6,7 @@ the changes event-sorcerer needs from the engine.
 ## Language
 
 **Orphan WAL**:
-A `{db}-wal` file, valid on its own terms, that sits beside an **Empty db**.
+A `{db}-wal` file of nonzero length, valid on its own terms, that sits beside an **Empty db**.
 _Avoid_: stale WAL, leftover WAL
 
 **Empty db**:
