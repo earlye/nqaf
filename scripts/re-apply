@@ -18,9 +18,15 @@ WORK_DIR="$CONFIG_DIR/work"
 upstream="$(cat "$CONFIG_DIR/upstream.txt")"
 fork="$(cat "$CONFIG_DIR/fork.txt")"
 
+# `claude -p` kills background tasks after 600s by default; the agent may
+# delegate long implementation work to one, so wait for it instead.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
+
 if [ ! -d "$WORK_DIR/.git" ]; then
   echo "Cloning $fork → $WORK_DIR"
   git clone "$fork" "$WORK_DIR"
+else
+  git -C "$WORK_DIR" remote set-url origin "$fork"
 fi
 
 # Ensure upstream remote exists
