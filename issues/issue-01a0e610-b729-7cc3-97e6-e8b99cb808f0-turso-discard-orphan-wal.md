@@ -192,11 +192,15 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   - `OneByte`: also a 1-byte file. This copies what SQLite's unix VFS
     does (see "What SQLite does").
   - `InvalidHeader`: also any file whose page 1 is not a valid header.
-    That means it is shorter than 100 bytes, or the header fails a
-    check: the magic string `"SQLite format 3\0"`, the page size (a
-    power of two from 512 to 32768, or 1), the payload fractions
-    64/32/32, the schema format (1-4), the text encoding (1-3), or the
-    reserved bytes 72-91 being zero. Page 1 is the only page that
+    That means it is shorter than 512 bytes (too short for a full page
+    1), or the header fails a check: the magic string
+    `"SQLite format 3\0"`, the page size (a power of two from 512 to
+    32768, or 1), the payload fractions 64/32/32, the schema format
+    (0-4), the text encoding (0-3), or the reserved bytes 72-91 being
+    zero. 0 counts as valid for schema format and text encoding,
+    because SQLite leaves them at 0 until the first table is created.
+    An encrypted db never counts as having an invalid header, because
+    its page 1 can't be checked without the key. Page 1 is the only page that
     identifies itself. Without it, nothing else in the file can be
     reached, so "zero valid pages" and "invalid page 1" are the same
     rule. On a read-write open, `InvalidHeader` **truncates both the
@@ -249,8 +253,10 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
   It switches only if it sees a compelling reason.
 - **Page-1 durability under `Discard`.** Under any `Discard` value,
   `allocate_page1` fsyncs the db file after writing page 1, before the
-  first WAL frame is written. When it has just created the db file, it
-  also fsyncs the parent directory. Without this, a power loss right
+  first WAL frame is written. It also fsyncs the parent directory
+  whenever the open found an empty db, including a 0-byte file that
+  already existed, because turso can't tell whether this open created
+  the file. Without this, a power loss right
   after the db is created can leave a legitimate WAL of committed
   frames beside a db that is absent, 0 bytes, or has a zeroed page 1,
   and `Discard` would delete that WAL. The cost is one or two fsyncs
@@ -266,8 +272,10 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
     directory and fsync it.
   - memory and memory_yield are a no-op returning `Ok`. Nothing
     survives a crash there, so there is nothing to make durable.
-  - windows and win_iocp are a no-op returning `Ok`, because NTFS
-    journals metadata. The implementer should confirm this.
+  - windows and win_iocp are a no-op returning `Ok`. NTFS journals the
+    file creation, and the db-file flush before the first WAL write
+    commits that journal, which SQLite relies on too. FAT and exFAT
+    are not covered.
   - `VfsMod`, whose C-ABI extension has no slot for this, and browser
     `Opfs` return `Unsupported`.
   - The simulator and test IOs get whichever behaviour fits them.
@@ -285,13 +293,12 @@ This is the shape of the `turso/prompts/feature-NNN.md` prompt. See
 - Copy `turso/docs/adr/0001-io-extensions-are-required-trait-methods.md`
   into the fork at `docs/adr/`. Prompts are self-contained, so the
   prompt carries the ADR text. The nqaf copy is the source of truth.
-- Not settled: `open_with_flags_bypass_registry*` (`lib.rs:1291,1325`)
-  lets a second `Database` in the same process open the same file.
-  fcntl locks don't exclude the same process, so the legacy-mode
-  argument doesn't cover this case. The risk is probably only a
-  zero-page window, because page 1 lands before any WAL frame. The
-  implementer should confirm this, or make `Discard` refuse
-  registry-bypassed opens.
+- `open_with_flags_bypass_registry*` (`lib.rs:1291,1325`) lets a second
+  `Database` in the same process open the same file, and fcntl locks
+  don't exclude the same process. **Under `Discard`, such opens fail
+  with a clear error.** The consequence is that sync-engine users can't
+  combine it with `Discard`, because the sync engine reopens the db
+  this way.
 
 ## Reproduction
 
@@ -422,10 +429,17 @@ Expect that gate to be slow or noisy for this fork.
 
 - [x] Run a real SQLite build against the same orphan-WAL setup. Done
   on 2026-09-28; the results are under "What SQLite does".
-- [ ] Wire `turso/` into nqaf (see "Landing it through nqaf").
-- [ ] Write the prompt, with its regression test.
-- [ ] Apply it, bump event-sorcerer's turso pin, and add the
-  conformance claim.
+- [x] Wire `turso/` into nqaf (see "Landing it through nqaf").
+- [x] Write the prompt, with its regression test
+  (`turso/prompts/feature-001.md`).
+- [x] Apply it. Done on 2026-09-29: `earlye-forks/turso` branch
+  `earlye/e8b99cb808f0/turso-discard-orphan-wal`, PR
+  https://github.com/earlye-forks/turso/pull/1, fix commit `190db39d3`.
+  The agent reported that `turso_core --lib` passed 2132 and failed 0,
+  and that the 11 new tests pass. Windows and wasm were not built.
+- [ ] Merge the fork PR, then bump event-sorcerer's turso pin and add
+  the conformance claim. That happens in the event-sorcerer session,
+  which has the decisions.
 
 ## Relevant files
 
@@ -581,3 +595,18 @@ These questions came up while the prompt was being written.
   to 0? — A: Yes.
 - An **orphan WAL** is a `-wal` of nonzero length. turso already treats
   a 0-byte WAL as no WAL.
+
+### 2026-10-02
+
+The apply run departed from the spec in these places. All were
+approved and folded into the prompt.
+
+- Schema format 0 and text encoding 0 count as a valid header,
+  because SQLite leaves them at 0 until the first table exists.
+- Db files shorter than 512 bytes count as an invalid header, not
+  only those under 100 bytes.
+- An encrypted db never counts as having an invalid header.
+- The parent directory is fsynced on every read-write open that finds
+  an empty db, not only when this open created the db file.
+- Registry-bypassed opens fail under `Discard`, so the sync engine
+  can't be combined with `Discard`.

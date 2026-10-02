@@ -9,9 +9,9 @@ decision against `query_interface`.
 ## `sync_parent_dir`
 
 - **Signature:** `fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion>`
-- **Added by:** the orphan-WAL discard prompt (not yet written;
+- **Added by:** `prompts/feature-001.md` (the orphan-WAL policy). It is
   tracked in
-  `issues/issue-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`).
+  `issues/issue-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`.
 - **Why:** under `OrphanWalPolicy::Discard`, a newly created db file
   and its page 1 must be durable before the first WAL frame is
   written. Otherwise a power loss can leave committed WAL frames beside
@@ -22,8 +22,9 @@ decision against `query_interface`.
     parent directory and fsync it.
   - memory and memory_yield: a no-op returning `Ok`. Nothing survives
     a crash, so there is nothing to make durable.
-  - windows and win_iocp: a no-op returning `Ok`, because NTFS
-    journals metadata. This still needs confirming by the implementer.
+  - windows and win_iocp: a no-op returning `Ok`. NTFS journals the
+    file creation, and the db-file flush before the first WAL write
+    commits that journal. FAT and exFAT are not covered.
   - `VfsMod`, whose C-ABI extension has no slot for this, and browser
     `Opfs`: `Unsupported`. `Discard` refuses to open on these.
   - Simulator and test IOs: whichever of the above fits.
