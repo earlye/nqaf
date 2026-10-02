@@ -8,7 +8,7 @@ CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
 upstream="$(cat "$CONFIG_DIR/upstream.txt")"
 fork="$(cat "$CONFIG_DIR/fork.txt")"
 
-fork_owner="$(sed -E 's#https://github.com/([^/]+)/.*#\1#' <<<"$fork")"
+fork_owner="$(sed -E 's#^(https://github\.com/|git@github\.com:)([^/]+)/.*#\2#' <<<"$fork")"
 fork_name="$(basename "$fork" .git)"
 me="$(gh api user --jq .login)"
 
