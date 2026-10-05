@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bootstrap <fork-dir>/patches/ for a fork whose prompts were applied before
+# scripts/apply started exporting patches. For each prompt, exports the most
+# recent "Apply <prompt>" commit reachable from the fork's default branch.
+
+FORK_DIR="${1:?Usage: export-patches <fork-dir>}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+WORK_DIR="$CONFIG_DIR/work"
+PATCHES_DIR="$CONFIG_DIR/patches"
+
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
+
+upstream="$(cat "$CONFIG_DIR/upstream.txt")"
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+if [ ! -d "$WORK_DIR/.git" ]; then
+  echo "Cloning $fork → $WORK_DIR"
+  git clone "$fork" "$WORK_DIR"
+fi
+
+# The upstream remote is only used to record which upstream commit each patch
+# was built against (upstream= in the .base file).
+if git -C "$WORK_DIR" remote get-url upstream &>/dev/null; then
+  git -C "$WORK_DIR" remote set-url upstream "$upstream"
+else
+  git -C "$WORK_DIR" remote add upstream "$upstream"
+fi
+
+echo "Fetching origin and upstream..."
+git -C "$WORK_DIR" fetch origin
+git -C "$WORK_DIR" fetch upstream
+git -C "$WORK_DIR" remote set-head upstream --auto >/dev/null
+
+default_branch="$(git -C "$WORK_DIR" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"
+
+missing=0
+for prompt in "$CONFIG_DIR/prompts/"*.md; do
+  prompt_name="$(basename "$prompt")"
+  # Newest first; take the first commit whose subject is exactly "Apply <name>".
+  commit="$(git -C "$WORK_DIR" log --format='%H %s' "origin/$default_branch" \
+    | awk -v want="Apply $prompt_name" '{ sha = $1; sub(/^[^ ]+ /, ""); if ($0 == want) { print sha; exit } }')"
+
+  if [ -z "$commit" ]; then
+    echo "No 'Apply $prompt_name' commit on origin/$default_branch; skipping" >&2
+    missing=$((missing + 1))
+    continue
+  fi
+  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR"
+done
+
+if [ "$missing" -gt 0 ]; then
+  echo "$missing prompt(s) had no matching commit (e.g. never applied, or squash-merged under a different subject)." >&2
+fi
+echo "Done. Review and commit $PATCHES_DIR in this repo."

@@ -17,6 +17,10 @@ shift
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
 WORK_DIR="$CONFIG_DIR/work"
+PATCHES_DIR="$CONFIG_DIR/patches"
+
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
 
 fork="$(cat "$CONFIG_DIR/fork.txt")"
 
@@ -103,6 +107,7 @@ $(cat "$prompt")"
     git -C "$WORK_DIR" commit -m "Apply $prompt_name"
     git -C "$WORK_DIR" push origin "$BRANCH"
     echo "Committed and pushed $prompt_name to $BRANCH"
+    export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR"
   fi
 done
 
