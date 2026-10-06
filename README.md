@@ -91,10 +91,15 @@ it from the fork yourself.
      `.nqaf/prompts/`).
 
    Note: if a prompt is *changed* and re-applied on a branch that already
-   carries it, the new commit (and so the exported patch) is only the delta
-   over the earlier application. `apply` warns when this happens; prefer
-   `re-apply` for changed prompts, which always produces one whole commit
-   per feature.
+   carries it, the new commit is only the delta over the earlier
+   application. When exporting (here and in `export-patches`), every
+   `Apply <prompt>` commit for that prompt is combined into one patch, as
+   long as nothing but those commits (or empty commits) sits between the
+   first and the last. If another feature's commit sits between them, only
+   the latest delta is exported, with a warning that names the commit in the
+   way; `re-apply` will then likely need the agent to repair that patch.
+   Prefer `re-apply` for changed prompts, which always produces one whole
+   commit per feature.
 
 3. **`scripts/export-patches <fork-dir>`** — one-time bootstrap for a fork
    whose prompts were applied before patches were stored here. Clones/fetches
@@ -107,6 +112,11 @@ it from the fork yourself.
    merged PR that contains an `Apply <prompt>` commit. For those, `parent=`
    is the pre-squash parent, which isn't on the default branch. Prompts
    found nowhere are skipped with a warning; `re-apply` treats them as new.
+
+   **`scripts/export-all-patches [<fork-dir> ...]`** runs `export-patches`
+   for every tracked fork (each top-level directory with a `fork.txt`), in
+   sorted order, or just for the ones you name. It keeps going if one fails,
+   prints which succeeded and which failed, and exits non-zero if any failed.
 
 4. **`scripts/re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]`**
    — for pulling in new upstream commits. A no-op if `upstream/HEAD` is
@@ -158,4 +168,5 @@ than required if `gh` isn't available).
 | Setting up a brand-new fork for the first time | `scripts/mirror <dir>` then `scripts/apply <dir> <branch>` |
 | Adding a newly-written prompt to an already-applied branch | `scripts/apply <dir> <branch> prompts/feature-NNN.md` |
 | Existing fork with no `patches/` yet | `scripts/export-patches <dir>` |
+| Existing forks with no `patches/` yet, all at once | `scripts/export-all-patches` |
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |

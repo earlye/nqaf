@@ -12,10 +12,10 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 USAGE="Usage: apply [--engine claude|oneclaw] [--model <id>] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
-FORK_DIR="${1:?$USAGE}"
-shift
-BRANCH="${1:?$USAGE}"
-shift
+[ "$#" -ge 2 ] || { echo "$USAGE" >&2; exit 1; }
+FORK_DIR="$1"
+BRANCH="$2"
+shift 2
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
 WORK_DIR="$CONFIG_DIR/work"
@@ -29,11 +29,11 @@ fork="$(cat "$CONFIG_DIR/fork.txt")"
 
 if [ ! -d "$WORK_DIR/.git" ]; then
   echo "Cloning $fork → $WORK_DIR"
-  git clone "$fork" "$WORK_DIR"
+  git clone --quiet --no-tags "$fork" "$WORK_DIR"
 fi
 
 echo "Fetching origin..."
-git -C "$WORK_DIR" fetch origin
+git -C "$WORK_DIR" fetch --quiet --no-tags origin
 
 default_branch="$(git -C "$WORK_DIR" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"
 
