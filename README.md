@@ -91,10 +91,15 @@ it from the fork yourself.
      `.nqaf/prompts/`).
 
    Note: if a prompt is *changed* and re-applied on a branch that already
-   carries it, the new commit (and so the exported patch) is only the delta
-   over the earlier application. `apply` warns when this happens; prefer
-   `re-apply` for changed prompts, which always produces one whole commit
-   per feature.
+   carries it, the new commit is only the delta over the earlier
+   application. When exporting (here and in `export-patches`), every
+   `Apply <prompt>` commit for that prompt is combined into one patch, as
+   long as nothing but those commits (or empty commits) sits between the
+   first and the last. If another feature's commit sits between them, only
+   the latest delta is exported, with a warning that names the commit in the
+   way; `re-apply` will then likely need the agent to repair that patch.
+   Prefer `re-apply` for changed prompts, which always produces one whole
+   commit per feature.
 
 3. **`scripts/export-patches <fork-dir>`** — one-time bootstrap for a fork
    whose prompts were applied before patches were stored here. Clones/fetches

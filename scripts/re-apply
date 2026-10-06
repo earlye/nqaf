@@ -169,7 +169,9 @@ $(cat "$prompt")"
     prompt_changed=0
     [ "$(base_value "$base" prompt-sha256)" = "$prompt_hash" ] || prompt_changed=1
 
-    if git -C "$WORK_DIR" am -3 "$patch" >/dev/null 2>&1; then
+    # --keep-cr: git am strips CRs by default, so patches touching CRLF files
+    # would never apply. (git apply, below, keeps them already.)
+    if git -C "$WORK_DIR" am -3 --keep-cr "$patch" >/dev/null 2>&1; then
       if [ "$prompt_changed" -eq 0 ]; then
         echo "== $prompt_name: stored patch applied cleanly"
         path="patch, clean"

@@ -11,19 +11,73 @@ sha256_of() {
   fi
 }
 
+# combine_applications <work-dir> <commit> <prompt-name> — prints the commit
+# to export for <prompt-name>, given its latest "Apply <prompt-name>" commit.
+#
+# A prompt applied again on a branch that already had it produces a commit
+# that is only the delta over the earlier application. Walking back along
+# first parents, if every commit down to the first application is either an
+# "Apply <prompt-name>" commit or touches no files, this builds (with
+# commit-tree, so no ref changes) one commit with the last application's tree
+# on the first application's parent. If another commit sits in between, the
+# feature can't be isolated, so it prints <commit> unchanged and warns.
+combine_applications() {
+  local work="$1" last="$2" name="$3"
+  local first="$last" p subject count=1
+
+  # first's parent already carries this prompt: find the previous application.
+  while git -C "$work" cat-file -e "$first^:.nqaf/prompts/$name" 2>/dev/null; do
+    p="$(git -C "$work" rev-parse "$first^")"
+    while :; do
+      subject="$(git -C "$work" log -1 --format=%s "$p")"
+      [ "$subject" = "Apply $name" ] && break
+      if git -C "$work" rev-parse -q --verify "$p^2" >/dev/null \
+         || ! git -C "$work" diff --quiet "$p^" "$p" 2>/dev/null; then
+        echo "Warning: ${name%.md}.patch is incremental over an earlier application of $name," \
+          "and can't be combined with it because $(git -C "$work" rev-parse --short "$p")" \
+          "('$subject') sits between them; re-apply will likely need the agent to repair it" >&2
+        echo "$last"
+        return
+      fi
+      p="$(git -C "$work" rev-parse "$p^")"
+    done
+    first="$p"
+    count=$((count + 1))
+  done
+
+  if [ "$first" = "$last" ]; then
+    echo "$last"
+    return
+  fi
+  echo "Combining $count applications of $name" \
+    "($(git -C "$work" rev-parse --short "$first")..$(git -C "$work" rev-parse --short "$last"))" >&2
+  # Author/committer copied from the last application, so re-exporting the
+  # same history yields the same commit.
+  local an ae ad cn ce cd
+  {
+    IFS= read -r an; IFS= read -r ae; IFS= read -r ad
+    IFS= read -r cn; IFS= read -r ce; IFS= read -r cd
+  } < <(git -C "$work" log -1 --date=raw --format='%an%n%ae%n%ad%n%cn%n%ce%n%cd' "$last")
+  GIT_AUTHOR_NAME="$an" GIT_AUTHOR_EMAIL="$ae" GIT_AUTHOR_DATE="$ad" \
+  GIT_COMMITTER_NAME="$cn" GIT_COMMITTER_EMAIL="$ce" GIT_COMMITTER_DATE="$cd" \
+    git -C "$work" commit-tree "$last^{tree}" -p "$first^" -m "Apply $name"
+}
+
 # export_patch <work-dir> <commit> <prompt-name> <patches-dir> [upstream-sha]
 #
-# Writes <patches-dir>/feature-NNN.patch (format-patch of <commit>) and
-# feature-NNN.base (parent=, upstream=, prompt-sha256=). The prompt hash is
-# taken from the .nqaf/prompts/<prompt-name> copy inside <commit>, so it
-# describes exactly the prompt that commit was produced from. If no upstream
-# sha is given, it falls back to the merge-base with upstream/HEAD when that
-# ref exists, and is omitted otherwise.
+# Writes <patches-dir>/feature-NNN.patch (format-patch of <commit>, combined
+# with earlier applications of the same prompt where possible — see
+# combine_applications) and feature-NNN.base (parent=, upstream=,
+# prompt-sha256=). The prompt hash is taken from the .nqaf/prompts/<prompt-name>
+# copy inside <commit>, so it describes exactly the prompt that commit was
+# produced from. If no upstream sha is given, it falls back to the merge-base
+# with upstream/HEAD when that ref exists, and is omitted otherwise.
 export_patch() {
   local work="$1" commit="$2" name="$3" dir="$4" upstream="${5:-}"
   local feature="${name%.md}"
   local parent hash
 
+  commit="$(combine_applications "$work" "$commit" "$name")"
   mkdir -p "$dir"
   # .claude/ holds per-checkout agent settings; older forks committed it, but
   # it never belongs in a stored patch.
@@ -42,12 +96,6 @@ export_patch() {
     echo "prompt-sha256=$hash"
   } > "$dir/$feature.base"
 
-  # A prompt re-applied on a branch that already had it produces a commit that
-  # is only the delta over the earlier application, not the whole feature.
-  if git -C "$work" cat-file -e "$commit^:.nqaf/prompts/$name" 2>/dev/null; then
-    echo "Warning: $feature.patch is incremental over an earlier application of $name;" \
-      "re-apply will likely need the agent to repair it" >&2
-  fi
   echo "Exported $feature.patch (+ .base) from $(git -C "$work" rev-parse --short "$commit")"
 }
 
