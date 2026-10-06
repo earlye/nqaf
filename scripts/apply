@@ -2,14 +2,16 @@
 set -euo pipefail
 
 ENGINE="claude"
+MODEL=""
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-USAGE="Usage: apply [--engine claude|oneclaw] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
+USAGE="Usage: apply [--engine claude|oneclaw] [--model <id>] <fork-dir> <branch> [prompts/feature-NNN.md ...]"
 FORK_DIR="${1:?$USAGE}"
 shift
 BRANCH="${1:?$USAGE}"
@@ -17,7 +19,12 @@ shift
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
 WORK_DIR="$CONFIG_DIR/work"
+PATCHES_DIR="$CONFIG_DIR/patches"
 
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
+
+MODEL="$(resolve_model "$ENGINE" "$MODEL")"
 fork="$(cat "$CONFIG_DIR/fork.txt")"
 
 if [ ! -d "$WORK_DIR/.git" ]; then
@@ -54,6 +61,7 @@ cat > "$WORK_DIR/.claude/settings.json" <<'EOF'
   "defaultMode": "bypassPermissions"
 }
 EOF
+exclude_local_files "$WORK_DIR"
 
 if [ "$#" -gt 0 ]; then
   prompts=("$@")
@@ -89,7 +97,7 @@ $(cat "$prompt")"
 
   case "$ENGINE" in
     oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$wrapped_prompt") ;;
-    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$wrapped_prompt") ;;
+    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$wrapped_prompt") ;;
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
 
@@ -97,12 +105,14 @@ $(cat "$prompt")"
   cp "$prompt" "$marker"
 
   git -C "$WORK_DIR" add -A
+  unstage_local_files "$WORK_DIR"
   if git -C "$WORK_DIR" diff --cached --quiet; then
     echo "No changes from $prompt_name; nothing to commit"
   else
     git -C "$WORK_DIR" commit -m "Apply $prompt_name"
     git -C "$WORK_DIR" push origin "$BRANCH"
     echo "Committed and pushed $prompt_name to $BRANCH"
+    export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR"
   fi
 done
 
@@ -116,7 +126,9 @@ if [ "$HAVE_GH" -eq 1 ]; then
       --base "$default_branch" \
       --head "$BRANCH" \
       --title "NQAF: apply prompts on $BRANCH" \
-      --body "Automated by \`scripts/apply\`. Prompts applied so far are recorded in \`.nqaf/prompts/\`.") \
+      --body "$(attribution_line "$ENGINE" "$MODEL")
+
+Automated by \`scripts/apply\`. Prompts applied so far are recorded in \`.nqaf/prompts/\`.") \
       || echo "PR creation failed (e.g. nothing to merge yet, or gh not authenticated) — branch is still pushed" >&2
   fi
 fi

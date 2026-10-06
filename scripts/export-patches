@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bootstrap <fork-dir>/patches/ for a fork whose prompts were applied before
+# scripts/apply started exporting patches. For each prompt, exports the most
+# recent "Apply <prompt>" commit reachable from the fork's default branch, or,
+# failing that, from the head of the newest merged PR that contains one.
+
+FORK_DIR="${1:?Usage: export-patches <fork-dir>}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+WORK_DIR="$CONFIG_DIR/work"
+PATCHES_DIR="$CONFIG_DIR/patches"
+
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
+
+upstream="$(cat "$CONFIG_DIR/upstream.txt")"
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+if [ ! -d "$WORK_DIR/.git" ]; then
+  echo "Cloning $fork → $WORK_DIR"
+  git clone "$fork" "$WORK_DIR"
+fi
+
+# The upstream remote is only used to record which upstream commit each patch
+# was built against (upstream= in the .base file).
+if git -C "$WORK_DIR" remote get-url upstream &>/dev/null; then
+  git -C "$WORK_DIR" remote set-url upstream "$upstream"
+else
+  git -C "$WORK_DIR" remote add upstream "$upstream"
+fi
+
+echo "Fetching origin and upstream..."
+git -C "$WORK_DIR" fetch origin
+git -C "$WORK_DIR" fetch upstream
+git -C "$WORK_DIR" remote set-head upstream --auto >/dev/null
+
+default_branch="$(git -C "$WORK_DIR" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"
+
+# find_apply_commit <ref> <prompt-name> — newest commit reachable from <ref>
+# whose subject is exactly "Apply <prompt-name>". (awk reads to the end rather
+# than exiting early, so git log never dies of SIGPIPE under pipefail.)
+find_apply_commit() {
+  git -C "$WORK_DIR" log --format='%H %s' "$1" \
+    | awk -v want="Apply $2" '!found { sha = $1; sub(/^[^ ]+ /, ""); if ($0 == want) { print sha; found = 1 } }'
+}
+
+# Squash-merged PRs leave no "Apply <prompt>" commits on the default branch,
+# but GitHub keeps refs/pull/<N>/head after the branch is deleted. Fetched
+# lazily, the first time a prompt isn't found on the default branch.
+pr_refs=()
+pr_refs_loaded=0
+load_pr_refs() {
+  pr_refs_loaded=1
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "gh not found; can't search merged PRs for squash-merged features" >&2
+    return
+  fi
+  local numbers n
+  numbers="$(gh pr list --repo "$fork" --state merged --limit 200 \
+    --json number,headRefName,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[].number')" \
+    || { echo "gh pr list failed; can't search merged PRs" >&2; return; }
+  for n in $numbers; do
+    if git -C "$WORK_DIR" fetch -q origin "+refs/pull/$n/head:refs/nqaf/pull/$n" 2>/dev/null; then
+      pr_refs+=("$n")
+    else
+      echo "Couldn't fetch refs/pull/$n/head; skipping PR #$n" >&2
+    fi
+  done
+  echo "Fetched heads of ${#pr_refs[@]} merged PR(s)"
+}
+
+missing=0
+for prompt in "$CONFIG_DIR/prompts/"*.md; do
+  prompt_name="$(basename "$prompt")"
+  commit="$(find_apply_commit "origin/$default_branch" "$prompt_name")"
+
+  if [ -z "$commit" ]; then
+    [ "$pr_refs_loaded" -eq 1 ] || load_pr_refs
+    # Newest merged PR first.
+    for n in "${pr_refs[@]}"; do
+      commit="$(find_apply_commit "refs/nqaf/pull/$n" "$prompt_name")"
+      if [ -n "$commit" ]; then
+        echo "Found 'Apply $prompt_name' in merged PR #$n (not on origin/$default_branch; squash-merged?)"
+        break
+      fi
+    done
+  fi
+
+  if [ -z "$commit" ]; then
+    echo "No 'Apply $prompt_name' commit on origin/$default_branch or in any merged PR; skipping" >&2
+    missing=$((missing + 1))
+    continue
+  fi
+  # For a squash-merged PR, parent= is the pre-squash parent, which isn't on
+  # the default branch; it is recorded as-is.
+  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR"
+done
+
+if [ "$missing" -gt 0 ]; then
+  echo "$missing prompt(s) had no matching commit anywhere (never applied?); re-apply will treat them as new." >&2
+fi
+echo "Done. Review and commit $PATCHES_DIR in this repo."
