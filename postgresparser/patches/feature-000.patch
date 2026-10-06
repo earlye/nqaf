@@ -1,6 +1,6 @@
-From 4c039a6ff4e146251c3e72108103373fa7a7c1ef Mon Sep 17 00:00:00 2001
-From: "Early Ehlinger [cerby]" <earlye@gmail.com>
-Date: Tue, 6 Oct 2026 02:31:06 +0000
+From 992f6833a3ac25d56580ed81e218698170c2f60a Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 6 Oct 2026 18:16:38 +0000
 Subject: [PATCH] Apply feature-000.md
 
 ---
@@ -9,18 +9,19 @@ Subject: [PATCH] Apply feature-000.md
  analysis/analysis.go                            |  2 +-
  analysis/analysis_ddl_test.go                   |  2 +-
  analysis/analysis_multi_statement_table_test.go |  2 +-
- analysis/combined_extractor.go                  |  2 +-
+ analysis/combined_extractor.go                  |  4 ++--
  analysis/fixes_test.go                          |  2 +-
  analysis/helpers.go                             |  2 +-
  analysis/helpers_test.go                        |  2 +-
  analysis/join_parser.go                         |  4 ++--
  analysis/join_parser_test.go                    |  2 +-
+ analysis/types.go                               |  2 +-
  analysis/where_conditions.go                    |  4 ++--
  analysis/where_conditions_test.go               |  2 +-
  antlr_stderr_test.go                            |  2 +-
  benchmark/bench_test.go                         |  4 ++--
  benchmark/go.mod                                |  8 ++++----
- benchmark/go.sum                                |  8 ++++++++
+ benchmark/go.sum                                |  4 ++++
  ddl.go                                          |  4 ++--
  ddl_comment.go                                  |  2 +-
  dml_common.go                                   |  2 +-
@@ -36,10 +37,13 @@ Subject: [PATCH] Apply feature-000.md
  go.mod                                          |  2 +-
  helpers.go                                      |  4 ++--
  helpers_comparison.go                           |  2 +-
+ helpers_function_wrapper.go                     |  2 +-
  merge.go                                        |  2 +-
+ parser_jsonb_compound_tokens_test.go            |  2 +-
+ placeholders.go                                 |  2 +-
  select.go                                       |  2 +-
  setops.go                                       |  2 +-
- 35 files changed, 70 insertions(+), 42 deletions(-)
+ 39 files changed, 71 insertions(+), 47 deletions(-)
  create mode 100644 .nqaf/prompts/feature-000.md
 
 diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
@@ -61,7 +65,7 @@ index 0000000..1ea4d1a
 +Do not make other changes.
 \ No newline at end of file
 diff --git a/README.md b/README.md
-index 8313431..082efb2 100644
+index ff539d2..2817cf3 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,7 +1,9 @@
@@ -84,7 +88,7 @@ index 8313431..082efb2 100644
  ```
  
  ## What you can build with it
-@@ -207,6 +209,13 @@ This is an ANTLR4-based grammar, not PostgreSQL's internal server parser. Some e
+@@ -244,6 +246,13 @@ This is an ANTLR4-based grammar, not PostgreSQL's internal server parser. Some e
  
  `ParseSQL` processes the first SQL statement for backward compatibility. For multi-statement input, use `ParseSQLAll`; to enforce exactly one statement, use `ParseSQLStrict`.
  
@@ -99,7 +103,7 @@ index 8313431..082efb2 100644
  
  Apache License 2.0 — see [LICENSE](LICENSE) for details.
 diff --git a/analysis/analysis.go b/analysis/analysis.go
-index da5b4b6..922adee 100644
+index 900505d..4d52cce 100644
 --- a/analysis/analysis.go
 +++ b/analysis/analysis.go
 @@ -6,7 +6,7 @@ import (
@@ -112,7 +116,7 @@ index da5b4b6..922adee 100644
  
  // AnalyzeSQL parses and analyzes only the first SQL statement in the input.
 diff --git a/analysis/analysis_ddl_test.go b/analysis/analysis_ddl_test.go
-index 389f6c0..c7ddd96 100644
+index f5ce416..ac3d28f 100644
 --- a/analysis/analysis_ddl_test.go
 +++ b/analysis/analysis_ddl_test.go
 @@ -6,7 +6,7 @@ import (
@@ -138,20 +142,22 @@ index f2c5ce2..67807e1 100644
  
  const multiCreateTableSQLAnalysis = `
 diff --git a/analysis/combined_extractor.go b/analysis/combined_extractor.go
-index baf0023..995e830 100644
+index bc260f6..8b49f94 100644
 --- a/analysis/combined_extractor.go
 +++ b/analysis/combined_extractor.go
-@@ -6,7 +6,7 @@ package analysis
- import (
+@@ -7,8 +7,8 @@ import (
  	"fmt"
+ 	"strings"
  
 -	"github.com/valkdb/postgresparser"
+-	"github.com/valkdb/postgresparser/internal/ident"
 +	"github.com/earlye/postgresparser"
++	"github.com/earlye/postgresparser/internal/ident"
  )
  
  // QueryAnalysisResult holds the combined results of query analysis.
 diff --git a/analysis/fixes_test.go b/analysis/fixes_test.go
-index 23a8ef5..049a2c1 100644
+index 4f2572e..74ef690 100644
 --- a/analysis/fixes_test.go
 +++ b/analysis/fixes_test.go
 @@ -13,7 +13,7 @@ import (
@@ -217,8 +223,21 @@ index d6c9c4d..c76d980 100644
  )
  
  // TestDeduplicateRelationships validates removal of duplicate join relationships.
+diff --git a/analysis/types.go b/analysis/types.go
+index 905e6d0..0835eb5 100644
+--- a/analysis/types.go
++++ b/analysis/types.go
+@@ -4,7 +4,7 @@
+ // can be consumed as an independent library.
+ package analysis
+ 
+-import "github.com/valkdb/postgresparser"
++import "github.com/earlye/postgresparser"
+ 
+ // SQLCommand identifies the high-level SQL statement type.
+ type SQLCommand string
 diff --git a/analysis/where_conditions.go b/analysis/where_conditions.go
-index 9696b07..f0710b4 100644
+index b1b5e03..9b3f2ed 100644
 --- a/analysis/where_conditions.go
 +++ b/analysis/where_conditions.go
 @@ -7,8 +7,8 @@ import (
@@ -233,7 +252,7 @@ index 9696b07..f0710b4 100644
  
  var parameterRegex = regexp.MustCompile(`^\$\d+$|^\?$`)
 diff --git a/analysis/where_conditions_test.go b/analysis/where_conditions_test.go
-index bc2fa8a..b9dd3a8 100644
+index 38c2913..cae4dc2 100644
 --- a/analysis/where_conditions_test.go
 +++ b/analysis/where_conditions_test.go
 @@ -8,7 +8,7 @@ import (
@@ -259,7 +278,7 @@ index 3e32d2d..bb319aa 100644
  
  var stderrCaptureMu sync.Mutex
 diff --git a/benchmark/bench_test.go b/benchmark/bench_test.go
-index acd2174..6c8fd47 100644
+index 1d8e796..bd33ca4 100644
 --- a/benchmark/bench_test.go
 +++ b/benchmark/bench_test.go
 @@ -5,8 +5,8 @@ import (
@@ -299,34 +318,22 @@ index 3e73c48..6260215 100644
 -replace github.com/valkdb/postgresparser => ..
 +replace github.com/earlye/postgresparser => ..
 diff --git a/benchmark/go.sum b/benchmark/go.sum
-index 7763c31..32c3a44 100644
+index 7763c31..4a53e6e 100644
 --- a/benchmark/go.sum
 +++ b/benchmark/go.sum
-@@ -1,14 +1,22 @@
- github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
- github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
-+github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
-+github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
- github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
- github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
- github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+@@ -6,6 +6,10 @@ github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
  github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
  github.com/pganalyze/pg_query_go/v6 v6.0.0 h1:in6RkR/apfqlAtvqgDxd4Y4o87a5Pr8fkKDB4DrDo2c=
  github.com/pganalyze/pg_query_go/v6 v6.0.0/go.mod h1:nvTHIuoud6e1SfrUaFwHqT0i4b5Nr+1rPWVds3B5+50=
-+github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
-+github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-+github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
-+github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
++github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
++github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
++go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
++go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
  golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 h1:vr/HnozRka3pE4EsMEg1lgkXJkTFJCVUX+S/ZT6wYzM=
  golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842/go.mod h1:XtvwrStGgqGPLc4cjQfWqZHG1YFdYs6swckp8vpsjnc=
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
- google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
- google.golang.org/protobuf v1.31.0 h1:g0LDEJHgrBl9N9r17Ru3sqWhkIx2NB67okBHPwC7hs8=
- google.golang.org/protobuf v1.31.0/go.mod h1:HV8QOd/L58Z+nl8r43ehVNZIU/HEI6OcFqwMG9pJV4I=
-+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
-+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 diff --git a/ddl.go b/ddl.go
-index 941a756..a1c1125 100644
+index 7621db6..7ec94ec 100644
 --- a/ddl.go
 +++ b/ddl.go
 @@ -7,8 +7,8 @@ import (
@@ -354,7 +361,7 @@ index 9d628d3..fbb154c 100644
  
  // populateCommentStmt handles COMMENT ON metadata extraction.
 diff --git a/dml_common.go b/dml_common.go
-index 22bdf93..7853463 100644
+index 08844c5..a64201a 100644
 --- a/dml_common.go
 +++ b/dml_common.go
 @@ -6,7 +6,7 @@ import (
@@ -367,7 +374,7 @@ index 22bdf93..7853463 100644
  
  // extractInsertColumns converts an insert_column_list into raw column names.
 diff --git a/dml_delete.go b/dml_delete.go
-index a5cbba2..e6cbe3c 100644
+index 6e1620c..d8b0812 100644
 --- a/dml_delete.go
 +++ b/dml_delete.go
 @@ -6,7 +6,7 @@ import (
@@ -380,7 +387,7 @@ index a5cbba2..e6cbe3c 100644
  
  // populateDelete captures DELETE targets, USING tables, predicates, and returning data.
 diff --git a/dml_insert.go b/dml_insert.go
-index 79da6cb..22a2402 100644
+index d9cb148..7c64e7a 100644
 --- a/dml_insert.go
 +++ b/dml_insert.go
 @@ -7,7 +7,7 @@ import (
@@ -393,7 +400,7 @@ index 79da6cb..22a2402 100644
  
  // populateInsert records INSERT target tables, columns, and upsert metadata.
 diff --git a/dml_update.go b/dml_update.go
-index 556105a..f9243ea 100644
+index 4383b11..8ba6922 100644
 --- a/dml_update.go
 +++ b/dml_update.go
 @@ -6,7 +6,7 @@ import (
@@ -406,7 +413,7 @@ index 556105a..f9243ea 100644
  
  // populateUpdate records UPDATE targets, SET clauses, joins, and returning data.
 diff --git a/entry.go b/entry.go
-index a43fed8..b4206fa 100644
+index 1e17019..185af0f 100644
 --- a/entry.go
 +++ b/entry.go
 @@ -7,7 +7,7 @@ import (
@@ -484,7 +491,7 @@ index 9e2a396..39c70f6 100644
  
  func main() {
 diff --git a/go.mod b/go.mod
-index 8ae6bfc..56fe2c9 100644
+index ba0b8d9..7502b72 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -1,4 +1,4 @@
@@ -494,7 +501,7 @@ index 8ae6bfc..56fe2c9 100644
  go 1.25.6
  
 diff --git a/helpers.go b/helpers.go
-index a95dd4b..b1b961c 100644
+index 5420566..fcc2860 100644
 --- a/helpers.go
 +++ b/helpers.go
 @@ -7,8 +7,8 @@ import (
@@ -509,7 +516,7 @@ index a95dd4b..b1b961c 100644
  
  // columnRef is an internal representation of a column reference.
 diff --git a/helpers_comparison.go b/helpers_comparison.go
-index 438542d..2d707fd 100644
+index d304263..5a22ac8 100644
 --- a/helpers_comparison.go
 +++ b/helpers_comparison.go
 @@ -7,7 +7,7 @@ import (
@@ -521,8 +528,21 @@ index 438542d..2d707fd 100644
  )
  
  // comparisonInfo holds information about a single comparison expression.
+diff --git a/helpers_function_wrapper.go b/helpers_function_wrapper.go
+index 7223319..a624a24 100644
+--- a/helpers_function_wrapper.go
++++ b/helpers_function_wrapper.go
+@@ -9,7 +9,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // allowedWrapperFunctions is the canonical lowercase set of function names that
 diff --git a/merge.go b/merge.go
-index ef4c99e..6b38fa6 100644
+index 72acaf4..0b41fc8 100644
 --- a/merge.go
 +++ b/merge.go
 @@ -7,7 +7,7 @@ import (
@@ -534,8 +554,34 @@ index ef4c99e..6b38fa6 100644
  )
  
  // populateMerge builds MergeClause metadata for target, source, and action clauses.
+diff --git a/parser_jsonb_compound_tokens_test.go b/parser_jsonb_compound_tokens_test.go
+index 52377c6..9cc4e03 100644
+--- a/parser_jsonb_compound_tokens_test.go
++++ b/parser_jsonb_compound_tokens_test.go
+@@ -6,7 +6,7 @@ import (
+ 	"github.com/antlr4-go/antlr/v4"
+ 	"github.com/stretchr/testify/require"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ func TestLexer_JSONBCompoundQuestionTokens(t *testing.T) {
+diff --git a/placeholders.go b/placeholders.go
+index 4eeaec8..2bed6bf 100644
+--- a/placeholders.go
++++ b/placeholders.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // placeholderContext records one parameter token plus its parser-rule ancestry.
 diff --git a/select.go b/select.go
-index 6cec745..11d8612 100644
+index 169258a..d284a80 100644
 --- a/select.go
 +++ b/select.go
 @@ -8,7 +8,7 @@ import (
@@ -548,7 +594,7 @@ index 6cec745..11d8612 100644
  
  // populateSelect builds SELECT metadata from the given ANTLR context.
 diff --git a/setops.go b/setops.go
-index 1ecfc8c..a3fb850 100644
+index 3d0db98..9e84214 100644
 --- a/setops.go
 +++ b/setops.go
 @@ -7,7 +7,7 @@ import (

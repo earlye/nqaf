@@ -1,16 +1,18 @@
-From bf62f314d3e464edc83232accbe7c3c5c507ddbd Mon Sep 17 00:00:00 2001
+From bd04ca12efb5ecc4ff17221cb3ed96c99e0404b7 Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Tue, 21 Jul 2026 13:00:33 -0500
+Date: Tue, 6 Oct 2026 16:56:42 +0000
 Subject: [PATCH] Apply feature-001.md
 
 ---
- .nqaf/prompts/feature-001.md          | 78 +++++++++++++++++++++++++++
- crates/obscura-browser/src/context.rs | 52 +++++++++++++-----
- crates/obscura-browser/src/page.rs    | 54 ++++++++++++++++++-
+ .nqaf/prompts/feature-001.md          | 78 ++++++++++++++++++++++++++
+ crates/obscura-browser/src/context.rs | 58 +++++++++++++------
+ crates/obscura-browser/src/page.rs    | 80 ++++++++++++++++++++++++--
  crates/obscura-cdp/src/dispatch.rs    |  4 +-
- crates/obscura-cli/src/main.rs        | 13 ++++-
- crates/obscura-net/src/client.rs      | 61 ++++++++++++++++++---
- 6 files changed, 237 insertions(+), 25 deletions(-)
+ crates/obscura-cdp/src/server.rs      |  4 +-
+ crates/obscura-cli/src/main.rs        | 19 ++++---
+ crates/obscura-net/src/client.rs      | 81 +++++++++++++++++++++++----
+ crates/obscura-net/src/wreq_client.rs | 20 ++++++-
+ 8 files changed, 298 insertions(+), 46 deletions(-)
  create mode 100644 .nqaf/prompts/feature-001.md
 
 diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
@@ -98,34 +100,39 @@ index 0000000..419c035
 +It requires no CDP access, no special flags, and no attacker sophistication
 +beyond getting a `file://` link or redirect into a page the automation visits.
 diff --git a/crates/obscura-browser/src/context.rs b/crates/obscura-browser/src/context.rs
-index 9be8f86..2317774 100644
+index 7b5139a..94b6bef 100644
 --- a/crates/obscura-browser/src/context.rs
 +++ b/crates/obscura-browser/src/context.rs
-@@ -15,13 +15,18 @@ pub struct BrowserContext {
+@@ -15,14 +15,20 @@ pub struct BrowserContext {
      pub robots_cache: Arc<RobotsCache>,
      pub obey_robots: bool,
      pub stealth: bool,
 -    /// When true, CDP-driven navigation to file:// URLs is permitted.
 -    /// Default is false: a remote CDP client cannot point the browser
 -    /// at /etc/shadow even if Obscura is running as a privileged user.
+-    /// Flip on via `obscura serve --allow-file-access` for legitimate
+-    /// local-HTML testing workflows. Enforced by `Page` navigation itself,
+-    /// so every CDP and MCP route is covered; the CLI's own `obscura fetch
+-    /// file://...` opts its local context in. A page can never drive
+-    /// itself from a web origin into file:// regardless of this flag.
 +    /// When true, navigation to file:// URLs is permitted. Default is false:
-+    /// a remote CDP client, or a page's own `location.href`/link-click/form
-+    /// navigation, cannot point the browser at /etc/shadow even if Obscura is
-+    /// running as a privileged user. Enforced by `http_client` itself
-+    /// (`ObscuraHttpClient::allow_file_access`, mirrored here at construction
-+    /// time), so every navigation path — CDP `Page.navigate`, page-triggered
-+    /// navigation, and redirect chains — is gated identically (feature-001).
-     /// Flip on via `obscura serve --allow-file-access` for legitimate
-     /// local-HTML testing workflows. The CLI's own `obscura fetch
--    /// file://...` path is unaffected because it does not go through
--    /// the CDP server.
-+    /// file://...` path is unaffected because it always passes file access
-+    /// through explicitly — it is the operator's own direct fetch target,
-+    /// not a page-triggered navigation.
++    /// a remote CDP client cannot point the browser at /etc/shadow even if
++    /// Obscura is running as a privileged user. Flip on via `obscura serve
++    /// --allow-file-access` for legitimate local-HTML testing workflows; the
++    /// CLI's own `obscura fetch file://...` opts its local context in. A page
++    /// can never drive itself from a web origin into file:// regardless of
++    /// this flag.
++    ///
++    /// Enforced twice: by `Page` navigation, and by `http_client` itself
++    /// (`ObscuraHttpClient::allow_file_access`, fixed at construction), so
++    /// redirects and any fetch path that bypasses `Page` are gated too.
++    /// Set it through `with_storage_and_security`. Mutating this field after
++    /// construction does not reach the already-built http client, which keeps
++    /// denying file://; `isolated_copy` builds a fresh client from the field.
      pub allow_file_access: bool,
      pub storage_dir: Option<PathBuf>,
      /// When true, the http client allows fetching localhost / RFC1918 /
-@@ -34,7 +39,7 @@ pub struct BrowserContext {
+@@ -35,7 +41,7 @@ pub struct BrowserContext {
  
  impl BrowserContext {
      pub fn new(id: String) -> Self {
@@ -134,7 +141,7 @@ index 9be8f86..2317774 100644
      }
  
      /// Create a BrowserContext with an optional storage directory.
-@@ -44,7 +49,7 @@ impl BrowserContext {
+@@ -45,7 +51,7 @@ impl BrowserContext {
          id: String,
          storage_dir: Option<PathBuf>,
      ) -> Self {
@@ -143,7 +150,7 @@ index 9be8f86..2317774 100644
      }
  
      /// Create a BrowserContext with full options including storage_dir.
-@@ -55,7 +60,7 @@ impl BrowserContext {
+@@ -56,7 +62,7 @@ impl BrowserContext {
          user_agent: Option<String>,
          storage_dir: Option<PathBuf>,
      ) -> Self {
@@ -152,7 +159,7 @@ index 9be8f86..2317774 100644
      }
  
      /// Variant that also accepts the `allow_private_network` opt-in. All
-@@ -69,7 +74,28 @@ impl BrowserContext {
+@@ -70,7 +76,24 @@ impl BrowserContext {
          storage_dir: Option<PathBuf>,
          allow_private_network: bool,
      ) -> Self {
@@ -161,12 +168,8 @@ index 9be8f86..2317774 100644
 +    }
 +
 +    /// Kitchen-sink constructor that also threads `allow_file_access` through
-+    /// to the underlying `ObscuraHttpClient` (feature-001). Previously
-+    /// `allow_file_access` was only ever set by mutating the field after
-+    /// construction, which never reached the already-built `http_client` —
-+    /// so the flag was consulted by the CDP command handlers but not by the
-+    /// actual fetch path. Callers that need this knob (CDP server, CLI
-+    /// `serve --allow-file-access`) must go through here instead.
++    /// to the underlying `ObscuraHttpClient`, so the network layer enforces
++    /// the same opt-in as `Page` navigation (feature-001).
 +    pub fn with_storage_and_security(
 +        id: String,
 +        proxy_url: Option<String>,
@@ -182,7 +185,7 @@ index 9be8f86..2317774 100644
      }
  
      fn _new_inner(
-@@ -79,6 +105,7 @@ impl BrowserContext {
+@@ -80,6 +103,7 @@ impl BrowserContext {
          user_agent: Option<String>,
          storage_dir: Option<PathBuf>,
          allow_private_network: bool,
@@ -190,7 +193,7 @@ index 9be8f86..2317774 100644
      ) -> Self {
          let cookie_jar = Arc::new(CookieJar::new());
  
-@@ -98,10 +125,11 @@ impl BrowserContext {
+@@ -99,10 +123,11 @@ impl BrowserContext {
              }
          }
  
@@ -203,7 +206,7 @@ index 9be8f86..2317774 100644
          );
          if stealth {
              client.block_trackers = true;
-@@ -130,7 +158,7 @@ impl BrowserContext {
+@@ -131,7 +156,7 @@ impl BrowserContext {
              robots_cache: Arc::new(RobotsCache::new()),
              obey_robots: false,
              stealth,
@@ -212,7 +215,7 @@ index 9be8f86..2317774 100644
              storage_dir,
              allow_private_network,
          }
-@@ -146,7 +174,7 @@ impl BrowserContext {
+@@ -147,7 +172,7 @@ impl BrowserContext {
          stealth: bool,
          user_agent: Option<String>,
      ) -> Self {
@@ -221,83 +224,138 @@ index 9be8f86..2317774 100644
      }
  
      pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
+@@ -164,10 +189,11 @@ impl BrowserContext {
+             cookie_jar.copy_from(&self.cookie_jar);
+         }
+ 
+-        let mut client = ObscuraHttpClient::with_full_options(
++        let mut client = ObscuraHttpClient::with_security_options(
+             cookie_jar.clone(),
+             self.proxy_url.as_deref(),
+             self.allow_private_network,
++            self.allow_file_access,
+         );
+         if self.stealth {
+             client.block_trackers = true;
 diff --git a/crates/obscura-browser/src/page.rs b/crates/obscura-browser/src/page.rs
-index a7176f0..fdd878d 100644
+index fbdc129..b1b9860 100644
 --- a/crates/obscura-browser/src/page.rs
 +++ b/crates/obscura-browser/src/page.rs
-@@ -1757,7 +1757,7 @@ fn url_matches_cdp_pattern(pattern: &str, url: &str) -> bool {
+@@ -1083,10 +1083,11 @@ impl Page {
+             // http://, which only works when the upstream happens to be a
+             // Clash-style mixed-mode proxy and breaks plain SOCKS5 servers
+             // like `ssh -ND` (#160).
+-            Some(Arc::new(StealthHttpClient::with_proxy(
++            Some(Arc::new(StealthHttpClient::with_security_options(
+                 context.cookie_jar.clone(),
+                 context.proxy_url.as_deref(),
+                 context.allow_private_network,
++                context.allow_file_access,
+             )))
+         } else {
+             None
+@@ -5270,16 +5271,15 @@ mod tests {
+     }
  
- #[cfg(test)]
- mod tests {
--    use super::{truncate_on_char_boundary, url_matches_cdp_pattern};
-+    use super::{truncate_on_char_boundary, url_matches_cdp_pattern, Page};
+     fn file_gate_context(name: &str, allow_file_access: bool) -> std::sync::Arc<crate::BrowserContext> {
+-        let mut context = crate::BrowserContext::with_storage_and_network(
++        std::sync::Arc::new(crate::BrowserContext::with_storage_and_security(
+             name.to_string(),
+             None,
+             false,
+             None,
+             None,
+             true,
+-        );
+-        context.allow_file_access = allow_file_access;
+-        std::sync::Arc::new(context)
++            allow_file_access,
++        ))
+     }
  
-     #[test]
-     fn truncate_never_splits_a_multibyte_char() {
-@@ -1794,6 +1794,58 @@ mod tests {
+     // file:// is a local file read, so a browser context must opt in before any
+@@ -10163,6 +10163,76 @@ mod tests {
              "https://fonts.gstatic.com/s/inter/v18/font.woff",
          ));
      }
 +
-+    // feature-001: a page's own `location.href` assignment queues a pending
-+    // navigation that is later drained by `process_pending_navigation` and
-+    // fetched directly against the http client — a path a CDP `Page.navigate`
-+    // command never touches. `allow_file_access` must gate that path too, not
-+    // just the CDP command handlers.
++    // feature-001: file:// access is enforced by the network layer itself, not
++    // only by `Page` navigation and the CDP handlers. A page's own
++    // `location.href` assignment queues a pending navigation that is drained by
++    // `process_pending_navigation`, a path no CDP command touches; with the
++    // default context it must not load the file, and the context's http client
++    // (shared by redirects, subresources and scripted fetches) must refuse it.
 +    #[tokio::test(flavor = "current_thread")]
 +    async fn page_triggered_navigation_to_file_url_is_blocked_by_default() {
-+        let context = std::sync::Arc::new(crate::context::BrowserContext::with_storage_and_security(
-+            "test".to_string(),
-+            None,
-+            false,
-+            None,
-+            None,
-+            false,
-+            false, // allow_file_access: default, disabled
++        let (path, file_url) = local_html_fixture("default-pending");
++        let context = file_gate_context("file-gate-default", false);
++        let mut page = super::Page::new("file-gate-default".to_string(), context.clone());
++        page.navigate("data:text/html,<p>web</p>").await.expect("web page");
++        let web_url = page.url_string();
++
++        page.evaluate(&format!(
++            "location.href = {}",
++            serde_json::to_string(&file_url).expect("json string")
 +        ));
-+        let mut page = Page::new("page-1".to_string(), context);
-+        page.navigate("data:text/html,<html></html>").await.unwrap();
-+        // A leading `const` forces the multi-statement wrapper (see
-+        // `wrap_expression` in obscura-js), so the assignment actually runs as a
-+        // statement rather than being folded into a single-expression `return (...)`.
-+        page.evaluate("const _n = 0; location.href = 'file:///etc/passwd'; return location.href;");
-+        let result = page.process_pending_navigation().await;
++        assert!(page.has_pending_navigation(), "the page queued a navigation");
++        let navigated = page.process_pending_navigation().await;
 +        assert!(
-+            result.is_err(),
-+            "page-triggered navigation to file:// must be rejected when allow_file_access is disabled"
++            !matches!(navigated, Ok(true)),
++            "page-triggered navigation to file:// must not load when allow_file_access is disabled"
 +        );
++        assert_eq!(page.url_string(), web_url);
++
++        let parsed = url::Url::parse(&file_url).expect("file url");
++        let error = context
++            .http_client
++            .fetch(&parsed)
++            .await
++            .expect_err("the network layer must refuse file:// by default");
++        assert!(error.to_string().contains("file://"), "{error}");
++
++        let _ = std::fs::remove_file(&path);
 +    }
 +
++    // The opt-in still works end to end: a local document in a context built
++    // with file access can follow its own `location.href` to another local
++    // file through the pending-navigation path.
 +    #[tokio::test(flavor = "current_thread")]
 +    async fn page_triggered_navigation_to_file_url_succeeds_when_allowed() {
-+        let context = std::sync::Arc::new(crate::context::BrowserContext::with_storage_and_security(
-+            "test".to_string(),
-+            None,
-+            false,
-+            None,
-+            None,
-+            false,
-+            true, // allow_file_access: explicitly opted in
++        let (first_path, first_url) = local_html_fixture("allowed-first");
++        let second_path = std::env::temp_dir().join(format!(
++            "obscura-file-gate-allowed-second-{}.html",
++            std::process::id()
 +        ));
-+        let mut page = Page::new("page-1".to_string(), context);
-+        page.navigate("data:text/html,<html></html>").await.unwrap();
-+        page.evaluate("const _n = 0; location.href = 'file:///etc/hosts'; return location.href;");
-+        let result = page.process_pending_navigation().await;
-+        assert_eq!(
-+            result.expect("page-triggered navigation to file:// must succeed when allow_file_access is enabled"),
-+            true,
-+            "expected a pending navigation to actually be processed",
-+        );
-+        assert_eq!(page.url.as_ref().map(|u| u.as_str()), Some("file:///etc/hosts"));
++        std::fs::write(&second_path, "<p id=next>next</p>").expect("write fixture");
++        let second_url = url::Url::from_file_path(&second_path).expect("file url").to_string();
++
++        let context = file_gate_context("file-gate-allowed", true);
++        assert!(context.http_client.allow_file_access);
++        let mut page = super::Page::new("file-gate-allowed".to_string(), context);
++        page.navigate(&first_url).await.expect("an opted-in context reads local files");
++
++        page.evaluate(&format!(
++            "location.href = {}",
++            serde_json::to_string(&second_url).expect("json string")
++        ));
++        let navigated = page
++            .process_pending_navigation()
++            .await
++            .expect("page-triggered file:// navigation must succeed when allowed");
++        assert!(navigated, "expected the pending navigation to be processed");
++        assert_eq!(page.url_string(), second_url);
++
++        let _ = std::fs::remove_file(&first_path);
++        let _ = std::fs::remove_file(&second_path);
 +    }
  }
  
  #[derive(Debug, thiserror::Error)]
 diff --git a/crates/obscura-cdp/src/dispatch.rs b/crates/obscura-cdp/src/dispatch.rs
-index cfeb540..69f5697 100644
+index 71dfceb..c50da87 100644
 --- a/crates/obscura-cdp/src/dispatch.rs
 +++ b/crates/obscura-cdp/src/dispatch.rs
-@@ -115,15 +115,15 @@ impl CdpContext {
+@@ -214,15 +214,15 @@ impl CdpContext {
          allow_file_access: bool,
          allow_private_network: bool,
      ) -> Self {
@@ -312,23 +370,45 @@ index cfeb540..69f5697 100644
 +            allow_file_access,
          );
 -        ctx.allow_file_access = allow_file_access;
-         let default_context = Arc::new(ctx);
-         // Pre-seed with the default-frame execution context ids that
-         // `Runtime.enable` (1) and post-navigation re-emission (2) advertise
+         Self::new_with_shared_context(Arc::new(ctx))
+     }
+ 
+diff --git a/crates/obscura-cdp/src/server.rs b/crates/obscura-cdp/src/server.rs
+index b3fc7df..eee57bd 100644
+--- a/crates/obscura-cdp/src/server.rs
++++ b/crates/obscura-cdp/src/server.rs
+@@ -514,15 +514,15 @@ pub async fn start_with_serve_options_limit_and_ready_file(
+     // gets an isolated copy with its own cookie jar and HTTP client (#449),
+     // while the thread-per-connection layout from #430 still confines that
+     // connection's V8 isolates to one OS thread.
+-    let mut bctx = obscura_browser::BrowserContext::with_storage_and_network(
++    let bctx = obscura_browser::BrowserContext::with_storage_and_security(
+         "default".to_string(),
+         proxy,
+         stealth,
+         user_agent,
+         storage_dir,
+         allow_private_network,
++        allow_file_access,
+     );
+-    bctx.allow_file_access = allow_file_access;
+     let shared_ctx = Arc::new(bctx);
+     // Persistence is deliberately separate from the connection template.
+     // Cookie deltas are merged here, but new connections always clone the
 diff --git a/crates/obscura-cli/src/main.rs b/crates/obscura-cli/src/main.rs
-index 1210131..db5b176 100644
+index fd19f24..7e55512 100644
 --- a/crates/obscura-cli/src/main.rs
 +++ b/crates/obscura-cli/src/main.rs
-@@ -582,13 +582,18 @@ async fn run_fetch(
+@@ -915,19 +915,20 @@ async fn run_fetch(
          return Ok(());
      }
  
--    let context = Arc::new(BrowserContext::with_storage_and_network(
-+    // `obscura fetch` takes its target URL directly from the CLI operator, not
-+    // from an untrusted page, so file:// access stays unconditional here (as it
-+    // always has been) rather than gated behind `--allow-file-access`, which is
-+    // scoped to `serve`'s CDP-driven, page-triggered navigation.
-+    let context = Arc::new(BrowserContext::with_storage_and_security(
+-    let mut context = BrowserContext::with_storage_and_network(
++    // The browser and network layers refuse file:// unless the context opts
++    // in. A local user running `obscura fetch file://...` on their own files
++    // is the intended case; only network-facing servers (serve, mcp) keep it
++    // off. Pass it at construction so the http client sees it too.
++    let mut context = BrowserContext::with_storage_and_security(
          "fetch".to_string(),
          proxy,
          stealth,
@@ -336,16 +416,31 @@ index 1210131..db5b176 100644
          storage_dir.clone(),
          allow_private_network,
 +        true,
-     ));
+     );
+     context.obey_robots = obey_robots;
+-    // The browser layer refuses file:// unless the context opts in. A local
+-    // user running `obscura fetch file://...` on their own files is the
+-    // intended case; only network-facing servers (serve, mcp) keep it off.
+-    context.allow_file_access = true;
+     let context = Arc::new(context);
      let mut page = Page::new("fetch-page".to_string(), context.clone());
- 
-@@ -698,9 +703,13 @@ async fn fetch_original_response(
-     let url = url::Url::parse(url_str)
-         .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
+     // Keep the browser's end-to-end navigation ceiling aligned with the CLI
+@@ -1311,7 +1312,7 @@ async fn fetch_original_response(
+     if stealth && url.scheme() != "file" {
+         #[cfg(feature = "stealth")]
+         {
+-            // `false` matches the reqwest path below (`with_options`); the
++            // `false` matches the reqwest path below; the
+             // CLI mirrors --allow-private-network into
+             // OBSCURA_ALLOW_PRIVATE_NETWORK at startup, which this client
+             // honours.
+@@ -1328,9 +1329,13 @@ async fn fetch_original_response(
+         }
+     }
  
 -    let client = obscura_net::ObscuraHttpClient::with_options(
-+    // Same rationale as `run_fetch`: this is the CLI operator's own direct
-+    // fetch target, not a page-triggered navigation, so file:// stays allowed.
++    // This is the CLI operator's own direct fetch target, not a
++    // page-triggered navigation, so file:// stays allowed (see run_fetch).
 +    let client = obscura_net::ObscuraHttpClient::with_security_options(
          Arc::new(obscura_net::CookieJar::new()),
          proxy.as_deref(),
@@ -355,15 +450,15 @@ index 1210131..db5b176 100644
      if let Some(ua) = user_agent {
          client.set_user_agent(&ua).await;
 diff --git a/crates/obscura-net/src/client.rs b/crates/obscura-net/src/client.rs
-index f259872..225bc23 100644
+index 86295e3..10049f1 100644
 --- a/crates/obscura-net/src/client.rs
 +++ b/crates/obscura-net/src/client.rs
-@@ -270,7 +270,11 @@ impl Resolve for SsrfGuardResolver {
+@@ -640,7 +640,11 @@ impl Resolve for SsrfGuardResolver {
      }
  }
  
--fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNetError> {
-+fn validate_url(
+-pub(crate) fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNetError> {
++pub(crate) fn validate_url(
 +    url: &Url,
 +    allow_private_network: bool,
 +    allow_file_access: bool,
@@ -371,7 +466,7 @@ index f259872..225bc23 100644
      let allow_private_network = allow_private_network || env_allows_private_network();
      let scheme = url.scheme();
      if scheme != "http" && scheme != "https" && scheme != "file" {
-@@ -280,7 +284,17 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
+@@ -650,7 +654,17 @@ pub(crate) fn validate_url(url: &Url, allow_private_network: bool) -> Result<(),
          )));
      }
  
@@ -390,21 +485,19 @@ index f259872..225bc23 100644
          return Ok(());
      }
  
-@@ -370,6 +384,13 @@ pub struct ObscuraHttpClient {
+@@ -850,6 +864,11 @@ pub struct ObscuraHttpClient {
      /// through in addition to the `OBSCURA_ALLOW_PRIVATE_NETWORK` env var.
      /// Set via `--allow-private-network` on the CLI (issue #33).
      pub allow_private_network: bool,
-+    /// When true, `validate_url` lets `file://` URLs through. This is the sole
-+    /// enforcement point for file-scheme access: every path that can trigger a
-+    /// fetch (CDP `Page.navigate`, a page's own `location.href`/link-click/form
-+    /// navigation, an HTTP redirect chain) routes through `fetch_with_method`,
-+    /// so gating it here — rather than only in the CDP command handlers —
-+    /// covers the plain library-embedding API too (feature-001).
++    /// When true, `validate_url` lets `file://` URLs through; default false.
++    /// Every fetch through this client (navigation, redirect hops, page
++    /// subresources, scripted fetch) is validated here, so the gate holds for
++    /// the plain library-embedding API as well as CDP (feature-001).
 +    pub allow_file_access: bool,
  }
  
- /// Derive the sec-ch-ua and sec-ch-ua-platform client-hint header values from a
-@@ -429,6 +450,19 @@ impl ObscuraHttpClient {
+ const RESOURCE_CACHE_MAX_ENTRIES: usize = 256;
+@@ -1045,6 +1064,19 @@ impl ObscuraHttpClient {
          cookie_jar: Arc<CookieJar>,
          proxy_url: Option<&str>,
          allow_private_network: bool,
@@ -424,33 +517,33 @@ index f259872..225bc23 100644
      ) -> Self {
          ObscuraHttpClient {
              client: tokio::sync::OnceCell::new(),
-@@ -443,6 +477,7 @@ impl ObscuraHttpClient {
-             timeout: Duration::from_secs(30),
+@@ -1061,6 +1093,7 @@ impl ObscuraHttpClient {
              block_trackers: false,
+             resource_loader: std::sync::Mutex::new(ResourceLoaderState::default()),
              allow_private_network,
 +            allow_file_access,
          }
      }
  
-@@ -511,7 +546,7 @@ impl ObscuraHttpClient {
-         initial_body: Option<Vec<u8>>,
+@@ -1378,7 +1411,7 @@ impl ObscuraHttpClient {
          callbacks: Option<&CallbackRegistry>,
+         request: ResourceRequest,
      ) -> Result<Response, ObscuraNetError> {
 -        validate_url(url, self.allow_private_network)?;
 +        validate_url(url, self.allow_private_network, self.allow_file_access)?;
+         validate_request_mode(&request, url)?;
  
          if url.scheme() == "file" {
-             return fetch_file_url(url).await;
-@@ -682,7 +717,7 @@ impl ObscuraHttpClient {
+@@ -1611,7 +1644,7 @@ impl ObscuraHttpClient {
                      let next_url = current_url.join(location_str).map_err(|e| {
                          ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
                      })?;
 -                    validate_url(&next_url, self.allow_private_network)?;
 +                    validate_url(&next_url, self.allow_private_network, self.allow_file_access)?;
-                     redirects.push(current_url.clone());
-                     current_url = next_url;
-                     if status == reqwest::StatusCode::MOVED_PERMANENTLY
-@@ -812,11 +847,21 @@ mod ssrf_tests {
+                     validate_request_mode(&request, &next_url)?;
+                     redirect_tainted |=
+                         redirect_taints_origin(&request, &current_url, &next_url);
+@@ -1909,21 +1942,31 @@ mod ssrf_tests {
      #[test]
      fn validate_url_blocks_unspecified_and_allows_public() {
          // 0.0.0.0 previously slipped through validate_url's literal-host check.
@@ -460,6 +553,20 @@ index f259872..225bc23 100644
 +        assert!(validate_url(&Url::parse("http://0.0.0.0:8080/").unwrap(), false, false).is_err());
 +        assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), false, false).is_err());
 +        assert!(validate_url(&Url::parse("http://example.com/").unwrap(), false, false).is_ok());
+         assert!(
+-            validate_url(&Url::parse("http://[64:ff9b::7f00:1]/").unwrap(), false).is_err()
++            validate_url(&Url::parse("http://[64:ff9b::7f00:1]/").unwrap(), false, false).is_err()
+         );
+         assert!(
+-            validate_url(&Url::parse("http://[2002:a9fe:a9fe::]/").unwrap(), false).is_err()
++            validate_url(&Url::parse("http://[2002:a9fe:a9fe::]/").unwrap(), false, false).is_err()
+         );
+-        assert!(validate_url(&Url::parse("http://192.0.0.9/").unwrap(), false).is_ok());
++        assert!(validate_url(&Url::parse("http://192.0.0.9/").unwrap(), false, false).is_ok());
+         assert!(
+-            validate_url(&Url::parse("http://[64:ff9b::808:808]/").unwrap(), false).is_ok()
++            validate_url(&Url::parse("http://[64:ff9b::808:808]/").unwrap(), false, false).is_ok()
+         );
          // The allow flag bypasses the guard (local-dev escape hatch).
 -        assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), true).is_ok());
 +        assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), true, false).is_ok());
@@ -475,4 +582,91 @@ index f259872..225bc23 100644
 +        assert!(validate_url(&file_url, false, true).is_ok());
      }
  
-     #[tokio::test]
+     #[test]
+@@ -2057,6 +2100,20 @@ mod ssrf_tests {
+         assert_eq!(response.body, b"folded");
+     }
+ 
++    // feature-001: a redirect hop into file:// goes through the same
++    // validate_url gate as the first URL, so a default client refuses it.
++    #[tokio::test]
++    async fn redirect_into_file_scheme_is_refused_by_default() {
++        let redirect = "HTTP/1.1 302 Found\r\nLocation: file:///etc/passwd\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
++        let (target, _rx) = http_fixture(vec![redirect.to_string()]).await;
++        let client = ObscuraHttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
++        let err = client
++            .fetch(&target)
++            .await
++            .expect_err("a redirect into file:// must be refused");
++        assert!(err.to_string().contains("file://"), "got {err:?}");
++    }
++
+     // WPT fetch/api/redirect/redirect-count: the 20th redirect must still be
+     // followed, the 21st must fail. Guards the `0..=max_redirects` boundary in
+     // fetch_with_profile_uncached; `0..max_redirects` regressed this to 19.
+diff --git a/crates/obscura-net/src/wreq_client.rs b/crates/obscura-net/src/wreq_client.rs
+index b0ab86f..0c3324b 100644
+--- a/crates/obscura-net/src/wreq_client.rs
++++ b/crates/obscura-net/src/wreq_client.rs
+@@ -187,6 +187,9 @@ async fn send_get_with_connection_reset_retry(
+ pub struct StealthHttpClient {
+     client: wreq::Client,
+     allow_private_network: bool,
++    /// Mirrors `ObscuraHttpClient::allow_file_access`: `validate_url` rejects
++    /// file:// unless the owning context opted in (feature-001).
++    allow_file_access: bool,
+     pub block_trackers: bool,
+     pub cookie_jar: Arc<CookieJar>,
+     pub extra_headers: RwLock<HashMap<String, String>>,
+@@ -211,6 +214,17 @@ impl StealthHttpClient {
+         cookie_jar: Arc<CookieJar>,
+         proxy_url: Option<&str>,
+         allow_private_network: bool,
++    ) -> Self {
++        Self::with_security_options(cookie_jar, proxy_url, allow_private_network, false)
++    }
++
++    /// Like `with_proxy`, also threading the context's `allow_file_access`
++    /// opt-in through to `validate_url` (feature-001).
++    pub fn with_security_options(
++        cookie_jar: Arc<CookieJar>,
++        proxy_url: Option<&str>,
++        allow_private_network: bool,
++        allow_file_access: bool,
+     ) -> Self {
+         let emulation_opts = wreq_util::Emulation::builder()
+             .profile(wreq_util::Profile::Chrome145)
+@@ -280,6 +294,7 @@ impl StealthHttpClient {
+         StealthHttpClient {
+             client,
+             allow_private_network,
++            allow_file_access,
+             block_trackers: tracker_blocking_enabled(
+                 std::env::var("OBSCURA_BLOCK_TRACKERS").ok().as_deref(),
+             ),
+@@ -317,7 +332,7 @@ impl StealthHttpClient {
+         request: ResourceRequest,
+         callbacks: Option<&CallbackRegistry>,
+     ) -> Result<Response, ObscuraNetError> {
+-        validate_url(url, self.allow_private_network)?;
++        validate_url(url, self.allow_private_network, self.allow_file_access)?;
+         validate_request_mode(&request, url)?;
+         if url.scheme() == "file" {
+             return fetch_file_url(url, request.max_response_bytes).await;
+@@ -445,7 +460,7 @@ impl StealthHttpClient {
+                     let next_url = current_url.join(location_str).map_err(|e| {
+                         ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
+                     })?;
+-                    validate_url(&next_url, self.allow_private_network)?;
++                    validate_url(&next_url, self.allow_private_network, self.allow_file_access)?;
+                     validate_request_mode(&request, &next_url)?;
+                     redirect_tainted |=
+                         redirect_taints_origin(&request, &current_url, &next_url);
+@@ -824,6 +839,7 @@ mod tests {
+         let client = StealthHttpClient {
+             client: wreq::Client::builder().no_proxy().build().unwrap(),
+             allow_private_network: true,
++            allow_file_access: false,
+             block_trackers: true,
+             cookie_jar: Arc::new(CookieJar::new()),
+             extra_headers: tokio::sync::RwLock::new(std::collections::HashMap::new()),

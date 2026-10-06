@@ -1,14 +1,12 @@
-From 95e8e804262db655af0bd864f367624c096eb396 Mon Sep 17 00:00:00 2001
+From a1e88262141fbf64472f42970b5a0147d71e7de5 Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Tue, 21 Jul 2026 13:16:48 -0500
+Date: Tue, 6 Oct 2026 17:36:01 +0000
 Subject: [PATCH] Apply feature-003.md
 
 ---
- .nqaf/prompts/feature-003.md          |  66 ++++++++++
- crates/obscura-browser/src/page.rs    |   1 +
- crates/obscura-net/src/client.rs      |  61 +++++----
- crates/obscura-net/src/wreq_client.rs | 177 ++++++++++++++++++++++++--
- 4 files changed, 273 insertions(+), 32 deletions(-)
+ .nqaf/prompts/feature-003.md          | 66 +++++++++++++++++++++++++++
+ crates/obscura-net/src/wreq_client.rs | 65 ++++++++++++++++++++++++++
+ 2 files changed, 131 insertions(+)
  create mode 100644 .nqaf/prompts/feature-003.md
 
 diff --git a/.nqaf/prompts/feature-003.md b/.nqaf/prompts/feature-003.md
@@ -83,277 +81,38 @@ index 0000000..f596ef7
 +every page it automates. A hostile page could use it to reach the automation
 +host's internal network or cloud-metadata endpoint, with nothing but ordinary
 +navigation or a `fetch()` call to a rebinding domain.
-diff --git a/crates/obscura-browser/src/page.rs b/crates/obscura-browser/src/page.rs
-index fdd878d..34d11da 100644
---- a/crates/obscura-browser/src/page.rs
-+++ b/crates/obscura-browser/src/page.rs
-@@ -222,6 +222,7 @@ impl Page {
-             Some(Arc::new(StealthHttpClient::with_proxy(
-                 context.cookie_jar.clone(),
-                 context.proxy_url.as_deref(),
-+                context.allow_private_network,
-             )))
-         } else {
-             None
-diff --git a/crates/obscura-net/src/client.rs b/crates/obscura-net/src/client.rs
-index 225bc23..32bf69f 100644
---- a/crates/obscura-net/src/client.rs
-+++ b/crates/obscura-net/src/client.rs
-@@ -228,13 +228,38 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
-     }
- }
- 
--/// reqwest DNS resolver that performs the lookup and then rejects the whole
--/// request if ANY resolved address is in the SSRF deny-set. This closes the
--/// DNS-rebinding bypass a host-string check alone cannot: a public name that
--/// resolves to 127.0.0.1 / 169.254.169.254 / an RFC1918 address is blocked at
--/// connect time, using the very addresses reqwest will dial. When private
--/// access is permitted (`--allow-private-network` or
--/// `OBSCURA_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
-+/// Looks up `host` and rejects the whole lookup if ANY resolved address is in
-+/// the SSRF deny-set. This closes the DNS-rebinding bypass a host-string check
-+/// alone cannot: a public name that resolves to 127.0.0.1 / 169.254.169.254 /
-+/// an RFC1918 address is blocked at connect time, using the very addresses the
-+/// HTTP client will dial. When private access is permitted
-+/// (`--allow-private-network` or `OBSCURA_ALLOW_PRIVATE_NETWORK`) the lookup
-+/// passes through unfiltered. Shared by the reqwest resolver (below) and the
-+/// wreq stealth-client resolver (`wreq_client::WreqSsrfGuardResolver`) so the
-+/// non-stealth and stealth HTTP backends can never disagree about which
-+/// resolved address is forbidden (feature-003).
-+pub(crate) async fn resolve_with_ssrf_guard(
-+    host: &str,
-+    allow_private: bool,
-+) -> Result<Vec<SocketAddr>, String> {
-+    let allow = allow_private || env_allows_private_network();
-+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
-+        .await
-+        .map_err(|e| e.to_string())?
-+        .collect();
-+    if !allow {
-+        if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
-+            return Err(format!(
-+                "SSRF blocked: '{}' resolves to forbidden address {}",
-+                host,
-+                bad.ip()
-+            ));
-+        }
-+    }
-+    Ok(addrs)
-+}
-+
-+/// reqwest DNS resolver built on `resolve_with_ssrf_guard`.
- pub struct SsrfGuardResolver {
-     allow_private: bool,
- }
-@@ -247,30 +272,18 @@ impl SsrfGuardResolver {
- 
- impl Resolve for SsrfGuardResolver {
-     fn resolve(&self, name: Name) -> Resolving {
--        let allow = self.allow_private || env_allows_private_network();
-+        let allow_private = self.allow_private;
-         let host = name.as_str().to_string();
-         Box::pin(async move {
--            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-+            resolve_with_ssrf_guard(&host, allow_private)
-                 .await
--                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
--                .collect();
--            if !allow {
--                if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
--                    return Err(format!(
--                        "SSRF blocked: '{}' resolves to forbidden address {}",
--                        host,
--                        bad.ip()
--                    )
--                    .into());
--                }
--            }
--            let iter: Addrs = Box::new(addrs.into_iter());
--            Ok(iter)
-+                .map(|addrs| -> Addrs { Box::new(addrs.into_iter()) })
-+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
-         })
-     }
- }
- 
--fn validate_url(
-+pub(crate) fn validate_url(
-     url: &Url,
-     allow_private_network: bool,
-     allow_file_access: bool,
 diff --git a/crates/obscura-net/src/wreq_client.rs b/crates/obscura-net/src/wreq_client.rs
-index bf56a9a..c9bee19 100644
+index 0c3324b..98fcd81 100644
 --- a/crates/obscura-net/src/wreq_client.rs
 +++ b/crates/obscura-net/src/wreq_client.rs
-@@ -32,21 +32,65 @@ pub const STEALTH_UA_PLATFORM: &str = "Windows";
- #[cfg(feature = "stealth")]
- pub const STEALTH_UA_PLATFORM_VERSION: &str = "15.0.0";
- 
-+/// wreq DNS resolver built on the same `resolve_with_ssrf_guard` helper the
-+/// non-stealth reqwest client uses (`client::SsrfGuardResolver`). Without
-+/// this, a hostname that isn't a literal IP but resolves to a private/
-+/// loopback address (attacker-controlled DNS, or a wildcard-DNS convenience
-+/// service mapping a hostname straight to an embedded IP) would reach the
-+/// wreq client's connector unfiltered, bypassing the `validate_fetch_url`
-+/// literal-string check entirely (feature-003).
-+#[cfg(feature = "stealth")]
-+struct WreqSsrfGuardResolver {
-+    allow_private: bool,
-+}
-+
-+#[cfg(feature = "stealth")]
-+impl wreq::dns::Resolve for WreqSsrfGuardResolver {
-+    fn resolve(&self, name: wreq::dns::Name) -> wreq::dns::Resolving {
-+        let allow_private = self.allow_private;
-+        let host = name.as_str().to_string();
-+        Box::pin(async move {
-+            crate::client::resolve_with_ssrf_guard(&host, allow_private)
-+                .await
-+                .map(|addrs| -> wreq::dns::Addrs { Box::new(addrs.into_iter()) })
-+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
-+        })
-+    }
-+}
-+
- #[cfg(feature = "stealth")]
- pub struct StealthHttpClient {
-     client: wreq::Client,
-     pub cookie_jar: Arc<CookieJar>,
-     pub extra_headers: RwLock<HashMap<String, String>>,
-     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
-+    /// Mirrors `ObscuraHttpClient::allow_private_network` (client.rs): gates
-+    /// the per-hop `validate_url` checks in `fetch`/`send_single` below.
-+    /// Stealth is a fully supported navigation path now, not a lesser-
-+    /// protected one, so it enforces the same "block private/loopback/
-+    /// link-local ranges unless explicitly allowed" policy (feature-003).
-+    allow_private_network: bool,
- }
- 
- #[cfg(feature = "stealth")]
- impl StealthHttpClient {
-     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
--        Self::with_proxy(cookie_jar, None)
-+        Self::with_options(cookie_jar, None, false)
+@@ -544,6 +544,11 @@ impl StealthHttpClient {
+         store_cookies: bool,
+         max_body_bytes: usize,
+     ) -> Result<StealthResponseHeaders, ObscuraNetError> {
++        // Enforce the SSRF policy at the transport too, not only in the
++        // caller's `validate_fetch_url`: the DNS resolver never sees a literal
++        // IP, so this is what stops a direct call to 127.0.0.1 or 10.0.0.1.
++        // Scripted requests never read file://, hence `false`.
++        validate_url(url, self.allow_private_network, false)?;
+         if is_tracker_blocked(url, self.block_trackers) {
+             tracing::debug!("Blocked tracker: {}", url);
+             return Ok(StealthResponseHeaders {
+@@ -942,4 +947,64 @@ mod tests {
+             .expect("loopback hostname must be reachable with the opt-in");
+         assert_eq!(resp.status, 200);
      }
- 
--    pub fn with_proxy(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
-+    pub fn with_proxy(
-+        cookie_jar: Arc<CookieJar>,
-+        proxy_url: Option<&str>,
-+        allow_private_network: bool,
-+    ) -> Self {
-+        Self::with_options(cookie_jar, proxy_url, allow_private_network)
-+    }
-+
-+    pub fn with_options(
-+        cookie_jar: Arc<CookieJar>,
-+        proxy_url: Option<&str>,
-+        allow_private_network: bool,
-+    ) -> Self {
-         let emulation_opts = wreq_util::Emulation::builder()
-             .profile(wreq_util::Profile::Chrome145)
-             .platform(wreq_util::Platform::Windows)
-@@ -55,7 +99,12 @@ impl StealthHttpClient {
-         let mut builder = wreq::Client::builder()
-             .emulation(emulation_opts)
-             .timeout(Duration::from_secs(30))
--            .redirect(wreq::redirect::Policy::none());
-+            .redirect(wreq::redirect::Policy::none())
-+            // SSRF guard: reject hostnames that resolve to a private/loopback
-+            // IP, mirroring ObscuraHttpClient's SsrfGuardResolver.
-+            .dns_resolver(Arc::new(WreqSsrfGuardResolver {
-+                allow_private: allow_private_network,
-+            }));
- 
-         if let Some(proxy) = proxy_url {
-             if let Ok(p) = wreq::Proxy::all(proxy) {
-@@ -70,10 +119,18 @@ impl StealthHttpClient {
-             cookie_jar,
-             extra_headers: RwLock::new(HashMap::new()),
-             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-+            allow_private_network,
-         }
-     }
- 
-     pub async fn fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
-+        // SSRF guard: same "block private/loopback/link-local ranges unless
-+        // explicitly allowed" policy as ObscuraHttpClient::fetch_with_method,
-+        // checked before every dial and again on every redirect hop below
-+        // (feature-003). The dns_resolver above additionally catches hostnames
-+        // that resolve to a forbidden address without being a literal IP.
-+        crate::client::validate_url(url, self.allow_private_network, false)?;
-+
-         let mut current_url = url.clone();
- 
-         if let Some(host) = current_url.host_str() {
-@@ -132,6 +189,7 @@ impl StealthHttpClient {
-                     let next_url = current_url.join(location_str).map_err(|e| {
-                         ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
-                     })?;
-+                    crate::client::validate_url(&next_url, self.allow_private_network, false)?;
-                     redirects.push(current_url.clone());
-                     current_url = next_url;
-                     continue;
-@@ -156,11 +214,15 @@ impl StealthHttpClient {
- 
-     /// One request with no redirect following, for scripted fetch()/XHR. Reads
-     /// the cookie jar for the Cookie header and stores Set-Cookie back into it,
--    /// so the caller only owns redirect hops and SSRF re-validation. Used in
--    /// stealth mode so JS-level requests carry the same Chrome TLS fingerprint
--    /// and client hints as the main navigation instead of the rustls ClientHello
--    /// that op_fetch_url would otherwise send (which bot managers read as a
--    /// non-browser script and reject, e.g. the AWS WAF challenge verify call).
-+    /// so the caller only owns redirect hops. Used in stealth mode so JS-level
-+    /// requests carry the same Chrome TLS fingerprint and client hints as the
-+    /// main navigation instead of the rustls ClientHello that op_fetch_url
-+    /// would otherwise send (which bot managers read as a non-browser script
-+    /// and reject, e.g. the AWS WAF challenge verify call).
-+    ///
-+    /// Re-validates the SSRF policy here too (not just in the caller's
-+    /// `validate_fetch_url` literal-string check) so this is safe to call
-+    /// directly, and so a caller can never forget the check (feature-003).
-     pub async fn send_single(
-         &self,
-         method: &str,
-@@ -168,6 +230,8 @@ impl StealthHttpClient {
-         headers: &HashMap<String, String>,
-         body: &str,
-     ) -> Result<Response, ObscuraNetError> {
-+        crate::client::validate_url(url, self.allow_private_network, false)?;
-+
-         if let Some(host) = url.host_str() {
-             if crate::blocklist::is_blocked(host) {
-                 tracing::debug!("Blocked tracker: {}", url);
-@@ -245,3 +309,100 @@ impl StealthHttpClient {
-         self.active_requests() == 0
-     }
- }
-+
-+#[cfg(all(test, feature = "stealth"))]
-+mod ssrf_tests {
-+    use super::*;
-+
-+    fn cookie_jar() -> Arc<CookieJar> {
-+        Arc::new(CookieJar::new())
-+    }
 +
 +    #[tokio::test]
-+    async fn stealth_navigation_blocks_loopback_literal_ip_by_default() {
-+        let client = StealthHttpClient::new(cookie_jar());
-+        let url = Url::parse("http://127.0.0.1:9/").unwrap();
-+        assert!(
-+            client.fetch(&url).await.is_err(),
-+            "loopback literal IP must be rejected by default"
-+        );
-+    }
-+
-+    #[tokio::test]
-+    async fn stealth_navigation_blocks_rfc1918_and_metadata_literal_ip_by_default() {
-+        let client = StealthHttpClient::new(cookie_jar());
++    async fn stealth_navigation_blocks_private_literal_ips_by_default() {
++        let port = gzip_fixture().await;
++        let loopback = format!("http://127.0.0.1:{port}/");
++        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
 +        for target in [
-+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
++            loopback.as_str(),
++            "http://[::1]:9/",
 +            "http://10.0.0.1/",
 +            "http://192.168.1.1/",
++            "http://169.254.169.254/latest/meta-data/",
 +        ] {
 +            let url = Url::parse(target).unwrap();
 +            assert!(
@@ -364,64 +123,42 @@ index bf56a9a..c9bee19 100644
 +    }
 +
 +    #[tokio::test]
-+    async fn stealth_navigation_blocks_hostname_resolving_to_private_address_by_default() {
-+        // localtest.me is a public DNS name that resolves to 127.0.0.1 -- the
-+        // canonical DNS-rebinding test (mirrors client::ssrf_tests::resolver_blocks_hostname_that_resolves_to_loopback).
-+        // A literal-string check alone (validate_fetch_url) cannot catch this;
-+        // it requires the dns_resolver installed on the wreq client itself.
-+        let client = StealthHttpClient::new(cookie_jar());
++    async fn stealth_navigation_blocks_hostname_resolving_to_loopback_by_default() {
++        // localtest.me resolves to 127.0.0.1, so only the resolver installed
++        // on the wreq client can catch it. Without DNS the lookup errors too.
++        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
 +        let url = Url::parse("http://localtest.me:9/").unwrap();
-+        match client.fetch(&url).await {
-+            Err(_) => {} // blocked, or DNS unavailable in a no-network sandbox -- both acceptable
-+            Ok(_) => panic!("hostname resolving to loopback must be rejected by default"),
-+        }
-+    }
-+
-+    #[tokio::test]
-+    async fn send_single_blocks_loopback_literal_ip_by_default() {
-+        // send_single is the scripted fetch()/XHR path (stealth_fetch_all in
-+        // obscura-js). It must enforce the same SSRF policy as main navigation.
-+        let client = StealthHttpClient::new(cookie_jar());
-+        let url = Url::parse("http://127.0.0.1:9/").unwrap();
 +        assert!(
-+            client
-+                .send_single("GET", &url, &HashMap::new(), "")
-+                .await
-+                .is_err(),
-+            "loopback literal IP must be rejected by default for scripted fetch/XHR"
++            client.fetch(&url).await.is_err(),
++            "hostname resolving to loopback must be rejected by default"
 +        );
 +    }
 +
 +    #[tokio::test]
-+    async fn stealth_navigation_allows_loopback_when_private_network_explicitly_allowed() {
-+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-+
-+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-+        let addr = listener.local_addr().unwrap();
-+        tokio::spawn(async move {
-+            if let Ok((mut stream, _)) = listener.accept().await {
-+                let mut buf = [0u8; 1024];
-+                let _ = stream.read(&mut buf).await;
-+                let body = b"ok";
-+                let resp = format!(
-+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-+                    body.len()
-+                );
-+                let _ = stream.write_all(resp.as_bytes()).await;
-+                let _ = stream.write_all(body).await;
-+                let _ = stream.shutdown().await;
-+            }
-+        });
-+
-+        // Explicit opt-in (the --allow-private-network / BrowserContext.allow_private_network flag).
-+        let client = StealthHttpClient::with_options(cookie_jar(), None, true);
-+        let url = Url::parse(&format!("http://{}/", addr)).unwrap();
-+        let result = client.fetch(&url).await;
++    async fn stealth_scripted_request_blocks_loopback_literal_ip_by_default() {
++        // A live fixture, so only the SSRF check can make this fail.
++        let port = gzip_fixture().await;
++        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
++        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
++        let result = client
++            .send_single("GET", &url, &std::collections::HashMap::new(), &[], false, false)
++            .await;
 +        assert!(
-+            result.is_ok(),
-+            "explicit opt-in must allow loopback: {:?}",
-+            result.err().map(|e| e.to_string())
++            result.is_err(),
++            "scripted request to loopback must be rejected by default"
 +        );
-+        assert_eq!(result.unwrap().status, 200);
 +    }
-+}
++
++    #[tokio::test]
++    async fn stealth_navigation_allows_loopback_literal_ip_with_opt_in() {
++        let port = gzip_fixture().await;
++        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
++        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
++
++        let resp = client
++            .fetch(&url)
++            .await
++            .expect("loopback literal IP must be reachable with the opt-in");
++        assert_eq!(resp.status, 200);
++    }
+ }

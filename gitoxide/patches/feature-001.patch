@@ -1,6 +1,6 @@
-From abe471a2d72b073ba447de2977ee2e483266b005 Mon Sep 17 00:00:00 2001
+From 40030133bcdde78468080e33d2911a3359446c06 Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Sun, 9 Aug 2026 16:10:49 -0500
+Date: Tue, 6 Oct 2026 16:12:09 +0000
 Subject: [PATCH] Apply feature-001.md
 
 ---
@@ -8,8 +8,8 @@ Subject: [PATCH] Apply feature-001.md
  README.md                                     |  12 ++
  .../client/blocking_io/http/curl/remote.rs    |   4 +
  .../src/client/blocking_io/http/mod.rs        |   7 ++
- .../client/blocking_io/http/reqwest/remote.rs | 107 ++++++++++--------
- 5 files changed, 122 insertions(+), 49 deletions(-)
+ .../client/blocking_io/http/reqwest/remote.rs | 110 ++++++++++--------
+ 5 files changed, 123 insertions(+), 51 deletions(-)
  create mode 100644 .nqaf/prompts/feature-001.md
 
 diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
@@ -60,7 +60,7 @@ index 000000000..d89c7b747
 +  the "About this Fork" for "Fork Features," and a subsection of "Fork
 +  Features" for the timeout settings.
 diff --git a/README.md b/README.md
-index 8dadbe541..1710d0475 100644
+index feed1b184..612ac1709 100644
 --- a/README.md
 +++ b/README.md
 @@ -12,6 +12,18 @@ security and correctness fixes applied on top of upstream, tracked as prompts ra
@@ -83,10 +83,10 @@ index 8dadbe541..1710d0475 100644
  
  1. **As Rust library**: Use the [`gix`](https://docs.rs/gix) crate as a Cargo dependency for API access.
 diff --git a/gix-transport/src/client/blocking_io/http/curl/remote.rs b/gix-transport/src/client/blocking_io/http/curl/remote.rs
-index d98ae97e0..c30ca7b47 100644
+index e3b391f4b..aa57e6af4 100644
 --- a/gix-transport/src/client/blocking_io/http/curl/remote.rs
 +++ b/gix-transport/src/client/blocking_io/http/curl/remote.rs
-@@ -339,6 +339,7 @@ pub fn new() -> Worker {
+@@ -434,6 +434,7 @@ pub fn new() -> Worker {
                      low_speed_limit_bytes_per_second,
                      low_speed_time_seconds,
                      connect_timeout,
@@ -94,21 +94,21 @@ index d98ae97e0..c30ca7b47 100644
                      proxy,
                      no_proxy,
                      proxy_auth_method,
-@@ -436,6 +437,9 @@ pub fn new() -> Worker {
+@@ -531,6 +532,9 @@ pub fn new() -> Worker {
              if let Some(timeout) = connect_timeout {
-                 handle.connect_timeout(timeout)?;
+                 curl!(handle.connect_timeout(timeout));
              }
 +            if let Some(timeout) = read_timeout {
-+                handle.timeout(timeout)?;
++                curl!(handle.timeout(timeout));
 +            }
              {
                  let mut auth = Auth::new();
                  match proxy_auth_method {
 diff --git a/gix-transport/src/client/blocking_io/http/mod.rs b/gix-transport/src/client/blocking_io/http/mod.rs
-index fdcb04fe8..014295302 100644
+index 71af2a746..cc429d972 100644
 --- a/gix-transport/src/client/blocking_io/http/mod.rs
 +++ b/gix-transport/src/client/blocking_io/http/mod.rs
-@@ -168,6 +168,12 @@ pub struct Options {
+@@ -171,6 +171,12 @@ pub struct Options {
      /// If `None`, this typically defaults to 2 minutes to 5 minutes.
      /// Refers to `gitoxide.http.connectTimeout`.
      pub connect_timeout: Option<std::time::Duration>,
@@ -121,7 +121,7 @@ index fdcb04fe8..014295302 100644
      /// If enabled, emit additional information about connections and possibly the data received or written.
      pub verbose: bool,
      /// If set, use this path to point to a file with CA certificates to verify peers.
-@@ -197,6 +203,7 @@ impl Default for Options {
+@@ -200,6 +206,7 @@ impl Default for Options {
              proxy_authenticate: None,
              user_agent: None,
              connect_timeout: None,
@@ -130,10 +130,10 @@ index fdcb04fe8..014295302 100644
              ssl_ca_info: None,
              ssl_version: None,
 diff --git a/gix-transport/src/client/blocking_io/http/reqwest/remote.rs b/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
-index ac2c9cb61..503137eb0 100644
+index 1112afbb2..5b808a226 100644
 --- a/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
 +++ b/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
-@@ -57,55 +57,10 @@ impl Default for Remote {
+@@ -49,57 +49,10 @@ impl Default for Remote {
              let mut follow = None;
              let redirect_action = Arc::new(Mutex::new(RedirectAction::Stop));
              let redirect_tail = Arc::new(Mutex::new(String::new()));
@@ -185,7 +185,9 @@ index ac2c9cb61..503137eb0 100644
 -                        }
 -                    }
 -                }))
--                .build()?;
+-                .build()
+-                .map_err(classify_reqwest)
+-                .or_raise(|| message("Could not initialize HTTP client"))?;
 +            // Built lazily from the first request's `config`, as connect/read timeouts are client-wide settings in
 +            // `reqwest` and aren't known until then. We may error while configuring, which is expected as part of the
 +            // internal protocol. The error will be received and the sender of the request might restart us.
@@ -193,7 +195,7 @@ index ac2c9cb61..503137eb0 100644
  
              for Request {
                  url,
-@@ -115,6 +70,60 @@ impl Default for Remote {
+@@ -109,6 +62,61 @@ impl Default for Remote {
                  config,
              } in req_recv
              {
@@ -218,9 +220,7 @@ index ac2c9cb61..503137eb0 100644
 +                                            }
 +
 +                                            match prev_urls.last() {
-+                                                Some(prev_url)
-+                                                    if !redirect::scheme_is_safe(curr_url.as_str(), prev_url.as_str()) =>
-+                                                {
++                                                Some(prev_url) if !redirect::scheme_is_safe(curr_url.as_str(), prev_url.as_str()) => {
 +                                                    // Don't follow insecure protocol redirects, particularly https-to-http downgrades.
 +                                                    attempt.stop()
 +                                                }
@@ -240,13 +240,16 @@ index ac2c9cb61..503137eb0 100644
 +                                                _ => attempt.follow(),
 +                                            }
 +                                        }
-+                                        RedirectAction::RejectConfiguredHeaders => attempt
-+                                            .error("refusing to follow redirect after request headers were configured"),
++                                        RedirectAction::RejectConfiguredHeaders => {
++                                            attempt.error("refusing to follow redirect after request headers were configured")
++                                        }
 +                                        RedirectAction::Stop => attempt.stop(),
 +                                    }
 +                                }
 +                            }))
-+                            .build()?,
++                            .build()
++                            .map_err(classify_reqwest)
++                            .or_raise(|| message("Could not initialize HTTP client"))?,
 +                    );
 +                }
 +                let client = client.as_ref().expect("just built above if absent");

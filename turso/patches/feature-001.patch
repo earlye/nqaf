@@ -1,19 +1,53 @@
-From 36d67d69061d78ae89f37e791b1d85ca6ec97189 Mon Sep 17 00:00:00 2001
+From 67f54e8922d359ccf7964e95bd3ae41164631e1d Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Tue, 29 Sep 2026 23:48:41 +0000
+Date: Tue, 6 Oct 2026 19:04:05 +0000
 Subject: [PATCH] Apply feature-001.md
 
 ---
- .nqaf/prompts/feature-001.md | 353 +++++++++++++++++++++++++++++++++++
- 1 file changed, 353 insertions(+)
+ .nqaf/prompts/feature-001.md                  | 364 ++++++++
+ README.md                                     |   5 +
+ bindings/javascript/src/browser.rs            |   6 +
+ core/database.rs                              | 364 +++++++-
+ core/error.rs                                 |   2 +
+ core/incremental/cursor.rs                    |   1 +
+ core/io/common.rs                             |   9 +
+ core/io/generic.rs                            |   9 +
+ core/io/io_uring.rs                           |   6 +
+ core/io/memory.rs                             |   5 +
+ core/io/memory_yield.rs                       |   9 +
+ core/io/mod.rs                                |   4 +
+ core/io/unix.rs                               |   6 +
+ core/io/vfs.rs                                |   4 +
+ core/io/win_iocp.rs                           |   8 +
+ core/io/windows.rs                            |   8 +
+ core/lib.rs                                   |   8 +-
+ .../database/group_commit_sync_mode_tests.rs  |   3 +
+ core/orphan_wal_tests.rs                      | 805 ++++++++++++++++++
+ core/storage/pager.rs                         |  28 +-
+ core/vdbe/statement_lifecycle_tests.rs        |   8 +
+ core/vdbe/vacuum.rs                           |   4 +
+ ...o-extensions-are-required-trait-methods.md |  51 ++
+ postgres/tests/integration/common.rs          |   8 +
+ sync/engine/src/sparse_io.rs                  |  13 +
+ sync/engine/src/wal_session.rs                |   4 +
+ testing/concurrent-simulator/io.rs            |   5 +
+ .../differential-oracle/fuzzer/memory/io.rs   |   7 +-
+ testing/simulator/runner/io.rs                |   8 +
+ testing/simulator/runner/memory/io.rs         |   6 +
+ tests/integration/common.rs                   |   7 +
+ tests/integration/queued_io.rs                |   4 +
+ tests/integration/unreliable_io.rs            |   4 +
+ 33 files changed, 1773 insertions(+), 10 deletions(-)
  create mode 100644 .nqaf/prompts/feature-001.md
+ create mode 100644 core/orphan_wal_tests.rs
+ create mode 100644 docs/adr/0001-io-extensions-are-required-trait-methods.md
 
 diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
 new file mode 100644
-index 000000000..b1aa6dc87
+index 000000000..ad42a2131
 --- /dev/null
 +++ b/.nqaf/prompts/feature-001.md
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,364 @@
 +# Add an opt-in orphan-WAL policy: discard a leftover `-wal` beside an empty db
 +
 +## Problem [feature-001]
@@ -115,10 +149,16 @@ index 000000000..b1aa6dc87
 +- `OneByte`: also a 1-byte file (SQLite's unix VFS reports a 1-byte file as
 +  0 bytes; this copies it).
 +- `InvalidHeader`: also any file whose page 1 is not a valid header: shorter
-+  than 100 bytes, or failing any of: magic `"SQLite format 3\0"`; page size a
-+  power of two in 512..=32768, or the value 1 (meaning 65536); payload
-+  fractions 64/32/32; schema format 1-4; text encoding 1-3; reserved bytes
-+  72-91 all zero. Page 1 is the only self-identifying page, so "no valid
++  than 512 bytes (the smallest page size, so too short for a full page 1,
++  and the existing header read needs 512), or failing any of: magic
++  `"SQLite format 3\0"`; page size a power of two in 512..=32768, or the
++  value 1 (meaning 65536); payload fractions 64/32/32; schema format 0-4;
++  text encoding 0-3; reserved bytes 72-91 all zero. **0 is valid for schema
++  format and text encoding**, because SQLite leaves them at 0 until the first
++  table is created. Rejecting 0 would wipe a real db whose tables are still
++  only in the WAL. The existing header validation accepts 0 too. **An
++  encrypted db never counts as having an invalid header**, because its
++  page 1 can't be checked without the key. Page 1 is the only self-identifying page, so "no valid
 +  pages" and "invalid page 1" are the same rule. Reuse existing header
 +  parsing/validation code where it exists rather than duplicating it.
 +
@@ -164,11 +204,11 @@ index 000000000..b1aa6dc87
 +  `lib.rs` ~1291 and ~1325) let a second `Database` in the same process open
 +  the same file; fcntl locks don't exclude the same process. The in-process
 +  `DATABASE_MANAGER` registry is otherwise safe (it returns the existing
-+  `Database`, so `OpenWal` doesn't run again). Either confirm by reading the
-+  code that discard is safe for bypassed opens (the suspected risk is only a
-+  zero-page window, since page 1 reaches the db file before any WAL frame),
-+  or make `Discard` fail such opens with a clear error. State which you did,
-+  and why, in the commit message.
++  `Database`, so `OpenWal` doesn't run again). **Under `Discard`, a
++  registry-bypassed open fails with a clear error.** Another `Database` in
++  the same process may already be using the WAL that `Discard` would
++  truncate. A known consequence: the sync engine reopens the db through this
++  path, so sync-engine users can't combine it with `Discard`.
 +
 +### Read-only open under `Discard`
 +
@@ -191,8 +231,11 @@ index 000000000..b1aa6dc87
 +db file and before the first WAL frame is written:
 +
 +- fsync the db file (`File::sync`), and
-+- if this `Database` created the db file (it did not exist before this
-+  open), call `IO::sync_parent_dir(db_path, ..)` and wait for it.
++- call `IO::sync_parent_dir(db_path, ..)` and wait for it. Do this whenever
++  the open found an empty db, including a 0-byte file that already existed.
++  By the time `Database` sees the file it has already been created, so it
++  can't tell whether this open created it. The extra cost is one directory
++  fsync, only for empty dbs.
 +
 +Without this, a power loss after the first commit can leave a legitimate WAL
 +of committed frames beside a db that is absent, 0 bytes, or has a zeroed
@@ -243,7 +286,7 @@ index 000000000..b1aa6dc87
 +| `GenericIO` | `core/io/generic.rs` | on unix: open parent dir, fsync; elsewhere: no-op `Ok` |
 +| `SparseLinuxIo` | `sync/engine/src/sparse_io.rs` | open the parent dir, fsync it |
 +| `MemoryIO`, `MemoryYieldIO` (+ test `StepGuardedIO`) | `core/io/memory.rs`, `core/io/memory_yield.rs` | no-op `Ok` (nothing survives a crash) |
-+| `WindowsIO`, `WindowsIOCP` | `core/io/windows.rs`, `core/io/win_iocp.rs` | no-op `Ok` (NTFS journals metadata) — **confirm this** and note the conclusion in a code comment; if a directory flush is actually needed, implement it |
++| `WindowsIO`, `WindowsIOCP` | `core/io/windows.rs`, `core/io/win_iocp.rs` | no-op `Ok`, with a code comment saying why: NTFS journals the file creation, and the db-file flush before the first WAL write commits that journal (SQLite relies on the same thing). FAT and exFAT are not covered. |
 +| `VfsMod` | `core/io/vfs.rs` | unsupported error (the C-ABI extension has no slot for it) |
 +| `Opfs` | `bindings/javascript/src/browser.rs` | unsupported error |
 +| `SyncCountingIo` (test) | `core/vdbe/vacuum.rs` | delegate to inner |
@@ -346,6 +389,8 @@ index 000000000..b1aa6dc87
 +   when another process is attached (the `.tshm` authority reports
 +   `MultiProcess`). Use a real child process, as the existing tests in
 +   `core/multiprocess_tests.rs` do (re-exec `current_exe` with a filter).
++10. **Registry-bypassed open:** under `Discard`, an
++   `open_with_flags_bypass_registry*` open fails with a clear error.
 +
 +## Constraints
 +
@@ -367,3 +412,1901 @@ index 000000000..b1aa6dc87
 +and the new required `IO::sync_parent_dir` method (an **IO extension**; see
 +`docs/adr/0001-io-extensions-are-required-trait-methods.md`), noting that
 +out-of-tree `IO` impls must now implement it.
+diff --git a/README.md b/README.md
+index 41b7571b3..0f83231eb 100644
+--- a/README.md
++++ b/README.md
+@@ -36,6 +36,11 @@ This repository is a fork of the upstream [Turso Database](https://github.com/tu
+ 
+ If you are re-mirroring this fork from a newer upstream release, see the fork's NQAF prompt history for the prompts that produced the current fixes, and re-apply them.
+ 
++### Fork Features
++
++* **Orphan-WAL policy.** `DatabaseOpts::with_orphan_wal_policy` takes an `OrphanWalPolicy`. The default, `Replay`, keeps upstream behaviour. `Discard { empty, read_only }` makes a read-write open throw away a leftover `-wal` that sits beside a database file holding no database (absent or 0 bytes; optionally also 1 byte, or any file without a valid page-1 header), by truncating it to 0 bytes through the supplied `IO`, instead of letting it bring an old database back. Read-only opens never modify files: they either ignore the WAL or replay it as upstream does, and fail on an invalid header. In multiprocess WAL mode the open fails rather than discard while another process is attached. Under `Discard`, page 1 of a new database is fsynced, and its parent directory synced, before the first WAL frame is written. Under `Discard`, opens that bypass the in-process registry (`Database::do_open`/`do_open_async`) fail, so the sync engine, which reopens databases through that path, cannot be combined with `Discard`.
++* **`IO::sync_parent_dir`** is a new required method on the `IO` trait (an **IO extension**; see [docs/adr/0001-io-extensions-are-required-trait-methods.md](docs/adr/0001-io-extensions-are-required-trait-methods.md)). It makes a file's directory entry durable. Out-of-tree `IO` implementations must now implement it; an IO that cannot provide it returns `LimboError::IoExtensionUnsupported`, and `OrphanWalPolicy::Discard` then refuses to open an empty database on it.
++
+ ## About
+ 
+ Turso is an in-process SQL database written in Rust, compatible with SQLite. It runs in production today at multiple organizations.
+diff --git a/bindings/javascript/src/browser.rs b/bindings/javascript/src/browser.rs
+index 0dc78a125..903a00491 100644
+--- a/bindings/javascript/src/browser.rs
++++ b/bindings/javascript/src/browser.rs
+@@ -156,6 +156,12 @@ impl IO for Opfs {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, _c: Completion) -> turso_core::Result<Completion> {
++        Err(turso_core::LimboError::IoExtensionUnsupported(
++            "sync_parent_dir",
++        ))
++    }
++
+     fn file_id(&self, path: &str) -> turso_core::Result<turso_core::io::FileId> {
+         Ok(turso_core::io::FileId::from_path_hash(path))
+     }
+diff --git a/core/database.rs b/core/database.rs
+index c482e6e84..308bfd3ef 100644
+--- a/core/database.rs
++++ b/core/database.rs
+@@ -80,6 +80,7 @@ pub struct DatabaseOpts {
+     pub enable_multiprocess_wal: bool,
+     pub enable_without_rowid: bool,
+     pub enable_experimental_mvcc_passive_checkpoint: bool,
++    pub orphan_wal_policy: OrphanWalPolicy,
+     pub unsafe_testing: bool,
+     pub(crate) enable_load_extension: bool,
+ }
+@@ -150,12 +151,42 @@ impl DatabaseOpts {
+         self
+     }
+ 
++    pub fn with_orphan_wal_policy(mut self, policy: OrphanWalPolicy) -> Self {
++        self.orphan_wal_policy = policy;
++        self
++    }
++
+     pub fn with_unsafe_testing(mut self, enable: bool) -> Self {
+         self.unsafe_testing = enable;
+         self
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub enum OrphanWalPolicy {
++    /// Default. Upstream behaviour, unchanged.
++    #[default]
++    Replay,
++    /// Read-write opens discard an orphan WAL instead of replaying it.
++    Discard {
++        empty: EmptyDb,
++        read_only: ReadOnlyOrphanWal,
++    },
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++pub enum EmptyDb {
++    ZeroBytes,
++    OneByte,
++    InvalidHeader,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ReadOnlyOrphanWal {
++    Ignore,
++    Replay,
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum SharedWalCoordinationOpenTelemetryMode {
+     Exclusive,
+@@ -407,6 +438,7 @@ pub(crate) enum InitState {
+ /// [`OpenDbAsyncPhase::ValidatingHeader`]. Keeps WAL recovery on open
+ /// non-blocking by yielding through its IO instead of `io.block`.
+ enum HeaderValidationState {
++    CheckOrphanWal(OrphanWalCheckState),
+     Start {
+         init: InitState,
+     },
+@@ -445,12 +477,47 @@ enum HeaderValidationState {
+ 
+ impl Default for HeaderValidationState {
+     fn default() -> Self {
+-        Self::Start {
+-            init: InitState::default(),
+-        }
++        Self::CheckOrphanWal(OrphanWalCheckState::Start)
+     }
+ }
+ 
++enum OrphanWalCheckState {
++    Start,
++    ReadingHeader {
++        header: DbHeaderReadState,
++        db_len: u64,
++    },
++    ProbingParentDirSync {
++        empty_db: EmptyDbFile,
++        db_len: u64,
++        completion: Completion,
++    },
++    TruncatingDb {
++        wal: Arc<dyn io::File>,
++        completion: Completion,
++    },
++    SyncingDb {
++        wal: Arc<dyn io::File>,
++        completion: Completion,
++    },
++    TruncatingWal {
++        wal: Arc<dyn io::File>,
++        completion: Completion,
++    },
++    SyncingWal {
++        #[allow(dead_code, reason = "keeps the WAL file open until its sync finishes")]
++        wal: Arc<dyn io::File>,
++        completion: Completion,
++    },
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum EmptyDbFile {
++    ZeroBytes,
++    OneByte,
++    InvalidHeader,
++}
++
+ /// How `Database::_connect` loads the connection's ANALYZE stats.
+ ///
+ /// A new connection starts from a clone of the shared schema, which carries
+@@ -1370,6 +1437,7 @@ impl Database {
+     #[cfg(all(feature = "fs", feature = "conn_raw_api"))]
+     pub fn do_open(io: Arc<dyn IO>, path: &str, mut options: OpenOptions) -> Result<Arc<Database>> {
+         Self::validate_open_options(&options)?;
++        Self::reject_orphan_wal_discard_for_registry_bypass(path, &options)?;
+         if options.storage.is_none() {
+             // `use_registry = false`: the raw path never consults the registry,
+             // so this only opens the file and never returns a cached Database.
+@@ -1398,6 +1466,7 @@ impl Database {
+         options: &OpenOptions,
+     ) -> IOResultOr<Arc<Database>> {
+         Self::validate_open_options(options)?;
++        Self::reject_orphan_wal_discard_for_registry_bypass(path, options)?;
+         let Some(storage) = options.storage.clone() else {
+             return Err(LimboError::InvalidArgument(
+                 "OpenOptions::storage is required for Database::do_open_async".to_string(),
+@@ -1421,6 +1490,18 @@ impl Database {
+         )
+     }
+ 
++    fn reject_orphan_wal_discard_for_registry_bypass(
++        path: &str,
++        options: &OpenOptions,
++    ) -> Result<()> {
++        if let OrphanWalPolicy::Discard { .. } = options.db_opts.orphan_wal_policy {
++            return Err(LimboError::InvalidArgument(format!(
++                "cannot open '{path}' with OrphanWalPolicy::Discard through Database::do_open/do_open_async: these opens skip the process-wide registry, so another Database in this process may be using the same files"
++            )));
++        }
++        Ok(())
++    }
++
+     /// Run the open state machine and release the schema guard if it fails.
+     /// Never touches the registry; both the registry-aware and raw entry
+     /// points funnel through here.
+@@ -1899,6 +1980,15 @@ impl Database {
+     ) -> IOResultOr<Arc<Pager>> {
+         loop {
+             match st {
++                HeaderValidationState::CheckOrphanWal(check) => {
++                    let encrypted = encryption_key.is_some()
++                        || page_codec.is_some()
++                        || !matches!(self.encryption_cipher_mode.get(), CipherMode::None);
++                    return_if_io!(self.check_orphan_wal(check, encrypted));
++                    *st = HeaderValidationState::Start {
++                        init: InitState::default(),
++                    };
++                }
+                 HeaderValidationState::Start { init } => {
+                     // `_init` does not modify `open_flags` (the autovacuum
+                     // override happens later in `Validate`), so capturing
+@@ -2156,7 +2246,9 @@ impl Database {
+                 } => {
+                     // Always open shared WAL and set it in the Database and Pager.
+                     // MVCC currently requires a WAL open to function.
+-                    let mut shared_wal = {
++                    let mut shared_wal = if self.ignores_orphan_wal() {
++                        WalFileShared::new_noop()
++                    } else {
+                         #[cfg(not(host_shared_wal))]
+                         {
+                             if driver.is_none() {
+@@ -2288,6 +2380,239 @@ impl Database {
+         }
+     }
+ 
++    fn check_orphan_wal(
++        &mut self,
++        st: &mut OrphanWalCheckState,
++        encrypted: bool,
++    ) -> IOResultOr<()> {
++        let OrphanWalPolicy::Discard { empty, read_only } = self.opts.orphan_wal_policy else {
++            return Ok(IOResult::Done(()));
++        };
++        loop {
++            match st {
++                OrphanWalCheckState::Start => {
++                    if is_memory_like(&self.path) {
++                        return Ok(IOResult::Done(()));
++                    }
++                    let db_len = self.db_file.size()?;
++                    let empty_db = match db_len {
++                        0 => Some(EmptyDbFile::ZeroBytes),
++                        _ if empty == EmptyDb::InvalidHeader && !encrypted => {
++                            if db_len >= PageSize::MIN as u64 {
++                                *st = OrphanWalCheckState::ReadingHeader {
++                                    header: DbHeaderReadState::default(),
++                                    db_len,
++                                };
++                                continue;
++                            }
++                            Some(EmptyDbFile::InvalidHeader)
++                        }
++                        1 if empty >= EmptyDb::OneByte => Some(EmptyDbFile::OneByte),
++                        _ => None,
++                    };
++                    let Some(empty_db) = empty_db else {
++                        return self.found_database();
++                    };
++                    if self.open_flags.contains(OpenFlags::ReadOnly) {
++                        return self.open_empty_db_read_only(empty_db, read_only);
++                    }
++                    *st = self.probe_parent_dir_sync(empty_db, db_len)?;
++                }
++                OrphanWalCheckState::ReadingHeader { header, db_len } => {
++                    let db_len = *db_len;
++                    let header = return_if_io!(self.read_db_header_buf(header));
++                    if holds_valid_database_header(header.bytes()) {
++                        return self.found_database();
++                    }
++                    if self.open_flags.contains(OpenFlags::ReadOnly) {
++                        return self.open_empty_db_read_only(EmptyDbFile::InvalidHeader, read_only);
++                    }
++                    *st = self.probe_parent_dir_sync(EmptyDbFile::InvalidHeader, db_len)?;
++                }
++                OrphanWalCheckState::ProbingParentDirSync {
++                    empty_db,
++                    db_len,
++                    completion,
++                } => {
++                    if !completion_succeeded(completion)? {
++                        io_yield_one!(completion.clone());
++                    }
++                    if self.db_file.size()? != *db_len {
++                        *st = OrphanWalCheckState::Start;
++                        continue;
++                    }
++                    let empty_db = *empty_db;
++                    let wal = self.io.open_file(&self.wal_path, self.open_flags, false)?;
++                    let wal_len = wal.size()?;
++                    if empty_db == EmptyDbFile::ZeroBytes && wal_len == 0 {
++                        return self.install_empty_page1(true);
++                    }
++                    self.reject_orphan_wal_discard_with_attached_peer()?;
++                    if empty_db == EmptyDbFile::ZeroBytes {
++                        let completion = wal.truncate(0, Completion::new_trunc(|_| {}))?;
++                        *st = OrphanWalCheckState::TruncatingWal { wal, completion };
++                        continue;
++                    }
++                    tracing::warn!(
++                        "truncating database file '{}': it holds no database under the orphan WAL policy",
++                        self.path
++                    );
++                    let completion = self.db_file.truncate(0, Completion::new_trunc(|_| {}))?;
++                    *st = OrphanWalCheckState::TruncatingDb { wal, completion };
++                }
++                OrphanWalCheckState::TruncatingDb { wal, completion } => {
++                    if !completion_succeeded(completion)? {
++                        io_yield_one!(completion.clone());
++                    }
++                    let completion = self
++                        .db_file
++                        .sync(Completion::new_sync(|_| {}), io::FileSyncType::Fsync)?;
++                    *st = OrphanWalCheckState::SyncingDb {
++                        wal: wal.clone(),
++                        completion,
++                    };
++                }
++                OrphanWalCheckState::SyncingDb { wal, completion } => {
++                    if !completion_succeeded(completion)? {
++                        io_yield_one!(completion.clone());
++                    }
++                    if wal.size()? == 0 {
++                        return self.install_empty_page1(true);
++                    }
++                    let completion = wal.truncate(0, Completion::new_trunc(|_| {}))?;
++                    *st = OrphanWalCheckState::TruncatingWal {
++                        wal: wal.clone(),
++                        completion,
++                    };
++                }
++                OrphanWalCheckState::TruncatingWal { wal, completion } => {
++                    if !completion_succeeded(completion)? {
++                        io_yield_one!(completion.clone());
++                    }
++                    tracing::warn!(
++                        "discarded WAL '{}': database file '{}' holds no database",
++                        self.wal_path,
++                        self.path
++                    );
++                    let completion =
++                        wal.sync(Completion::new_sync(|_| {}), io::FileSyncType::Fsync)?;
++                    *st = OrphanWalCheckState::SyncingWal {
++                        wal: wal.clone(),
++                        completion,
++                    };
++                }
++                OrphanWalCheckState::SyncingWal { completion, .. } => {
++                    if !completion_succeeded(completion)? {
++                        io_yield_one!(completion.clone());
++                    }
++                    return self.install_empty_page1(true);
++                }
++            }
++        }
++    }
++
++    fn found_database(&mut self) -> IOResultOr<()> {
++        if !self.pager_state.initialized() {
++            self.replace_pager_state(SharedPagerState::new(None));
++        }
++        Ok(IOResult::Done(()))
++    }
++
++    fn open_empty_db_read_only(
++        &mut self,
++        empty_db: EmptyDbFile,
++        read_only: ReadOnlyOrphanWal,
++    ) -> IOResultOr<()> {
++        match (empty_db, read_only) {
++            (EmptyDbFile::InvalidHeader, _) => Err(LimboError::Corrupt(format!(
++                "database file '{}' does not hold a valid database header, and a read-only open cannot discard it",
++                self.path
++            ))
++            .into()),
++            (EmptyDbFile::OneByte, ReadOnlyOrphanWal::Ignore) => self.install_empty_page1(false),
++            (EmptyDbFile::ZeroBytes, _) | (EmptyDbFile::OneByte, ReadOnlyOrphanWal::Replay) => {
++                Ok(IOResult::Done(()))
++            }
++        }
++    }
++
++    fn probe_parent_dir_sync(
++        &self,
++        empty_db: EmptyDbFile,
++        db_len: u64,
++    ) -> Result<OrphanWalCheckState> {
++        let completion = match self
++            .io
++            .sync_parent_dir(&self.path, Completion::new_sync(|_| {}))
++        {
++            Err(LimboError::IoExtensionUnsupported(method)) => {
++                return Err(LimboError::InvalidArgument(format!(
++                    "cannot open '{}' with OrphanWalPolicy::Discard: the IO backend does not support IO::{method}, which is needed to make a new database file durable",
++                    self.path
++                )));
++            }
++            result => result?,
++        };
++        Ok(OrphanWalCheckState::ProbingParentDirSync {
++            empty_db,
++            db_len,
++            completion,
++        })
++    }
++
++    fn install_empty_page1(&mut self, sync_parent_dir_after_page1: bool) -> IOResultOr<()> {
++        let cipher = self.encryption_cipher_mode.get();
++        let cipher = (!matches!(cipher, CipherMode::None)).then_some(cipher);
++        let mut pager_state = SharedPagerState::new(Some(pager::default_page1(cipher.as_ref())));
++        if sync_parent_dir_after_page1 {
++            pager_state = pager_state.sync_parent_dir_after_page1(self.path.clone());
++        }
++        self.replace_pager_state(pager_state);
++        Ok(IOResult::Done(()))
++    }
++
++    fn replace_pager_state(&mut self, pager_state: SharedPagerState) {
++        turso_assert!(
++            Arc::strong_count(&self.pager_state) == 1,
++            "pager state must not be shared before the orphan WAL check"
++        );
++        self.pager_state = Arc::new(pager_state);
++    }
++
++    #[cfg(host_shared_wal)]
++    fn reject_orphan_wal_discard_with_attached_peer(&self) -> Result<()> {
++        let Some(authority) = self.open_shared_wal_coordination_for_open()? else {
++            return Ok(());
++        };
++        if authority.open_mode()
++            == storage::shared_wal_coordination::SharedWalCoordinationOpenMode::MultiProcess
++        {
++            return Err(LimboError::LockingError(format!(
++                "cannot discard orphan WAL '{}' beside empty database file '{}': another process is attached to the database through '{}'",
++                self.wal_path,
++                self.path,
++                storage::wal::coordination_path_for_wal_path(&self.wal_path)
++            )));
++        }
++        Ok(())
++    }
++
++    #[cfg(not(host_shared_wal))]
++    fn reject_orphan_wal_discard_with_attached_peer(&self) -> Result<()> {
++        Ok(())
++    }
++
++    fn ignores_orphan_wal(&self) -> bool {
++        matches!(
++            self.opts.orphan_wal_policy,
++            OrphanWalPolicy::Discard {
++                read_only: ReadOnlyOrphanWal::Ignore,
++                ..
++            }
++        ) && self.open_flags.contains(OpenFlags::ReadOnly)
++            && !self.pager_state.initialized()
++    }
++
+     pub fn get_database_canonical_path(&self) -> String {
+         if self.is_in_memory_db() {
+             // For in-memory databases, SQLite shows empty string
+@@ -3455,6 +3780,37 @@ impl Database {
+     }
+ }
+ 
++fn completion_succeeded(completion: &Completion) -> Result<bool> {
++    if let Some(err) = completion.get_error() {
++        return Err(err.into());
++    }
++    Ok(completion.succeeded())
++}
++
++fn holds_valid_database_header(bytes: &[u8]) -> bool {
++    if bytes.starts_with(TURSO_HEADER_PREFIX) {
++        return true;
++    }
++    let Some(header_bytes) = bytes.get(..DatabaseHeader::SIZE) else {
++        return false;
++    };
++    let header: &DatabaseHeader = bytemuck::from_bytes(header_bytes);
++    header.magic == SQLITE_HEADER
++        && PageSize::new_from_header_u16(header.page_size.get_raw()).is_ok()
++        && header.max_embed_frac == 64
++        && header.min_embed_frac == 32
++        && header.leaf_frac == 32
++        && header.schema_format.get() <= 4
++        && matches!(
++            header.text_encoding,
++            TextEncoding::Unset
++                | TextEncoding::Utf8
++                | TextEncoding::Utf16Le
++                | TextEncoding::Utf16Be
++        )
++        && header_bytes[72..92].iter().all(|byte| *byte == 0)
++}
++
+ pub(crate) struct AttachedDatabase {
+     pub(crate) db: Arc<Database>,
+     pub(crate) pager: Arc<Pager>,
+diff --git a/core/error.rs b/core/error.rs
+index 7741c2329..c23bb06e1 100644
+--- a/core/error.rs
++++ b/core/error.rs
+@@ -129,6 +129,8 @@ pub enum LimboError {
+     UnsupportedEncoding(String),
+     #[error("Out of memory")]
+     OutOfMemory,
++    #[error("the IO backend does not support {0}")]
++    IoExtensionUnsupported(&'static str),
+ }
+ 
+ /// `?` in functions returning boxed errors (see `InsnResult`) composes
+diff --git a/core/incremental/cursor.rs b/core/incremental/cursor.rs
+index 04b8a8341..2a6e4ef1b 100644
+--- a/core/incremental/cursor.rs
++++ b/core/incremental/cursor.rs
+@@ -405,6 +405,7 @@ mod tests {
+                 enable_multiprocess_wal: false,
+                 enable_without_rowid: false,
+                 enable_experimental_mvcc_passive_checkpoint: false,
++                orphan_wal_policy: crate::OrphanWalPolicy::Replay,
+                 unsafe_testing: false,
+             },
+             None,
+diff --git a/core/io/common.rs b/core/io/common.rs
+index 590591cc5..d42af9c29 100644
+--- a/core/io/common.rs
++++ b/core/io/common.rs
+@@ -1,5 +1,14 @@
+ pub const ENV_DISABLE_FILE_LOCK: &str = "LIMBO_DISABLE_FILE_LOCK";
+ 
++#[cfg(unix)]
++pub(crate) fn fsync_parent_dir(path: &str) -> std::io::Result<()> {
++    let parent = match std::path::Path::new(path).parent() {
++        Some(parent) if !parent.as_os_str().is_empty() => parent,
++        _ => std::path::Path::new("."),
++    };
++    std::fs::File::open(parent)?.sync_all()
++}
++
+ #[cfg(test)]
+ pub mod tests {
+     use crate::{Result, IO};
+diff --git a/core/io/generic.rs b/core/io/generic.rs
+index e6bb16e88..b23602c87 100644
+--- a/core/io/generic.rs
++++ b/core/io/generic.rs
+@@ -39,6 +39,15 @@ impl IO for GenericIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        #[cfg(unix)]
++        crate::io::common::fsync_parent_dir(path).map_err(|e| io_error(e, "sync_parent_dir"))?;
++        #[cfg(not(unix))]
++        let _ = path;
++        c.complete(0);
++        Ok(c)
++    }
++
+     #[instrument(err, skip_all, level = Level::TRACE)]
+     fn step(&self) -> Result<()> {
+         Ok(())
+diff --git a/core/io/io_uring.rs b/core/io/io_uring.rs
+index 793f357a2..2c96783a8 100644
+--- a/core/io/io_uring.rs
++++ b/core/io/io_uring.rs
+@@ -487,6 +487,12 @@ impl IO for UringIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        common::fsync_parent_dir(path).map_err(|e| io_error(e, "sync_parent_dir"))?;
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn cancel(&self, completions: &[Completion]) -> Result<()> {
+         let mut state = self.state.lock();
+         for c in completions {
+diff --git a/core/io/memory.rs b/core/io/memory.rs
+index 887377cb0..ce28aae4d 100644
+--- a/core/io/memory.rs
++++ b/core/io/memory.rs
+@@ -87,6 +87,11 @@ impl IO for MemoryIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn file_id(&self, path: &str) -> Result<super::FileId> {
+         Ok(super::FileId::from_path_hash(path))
+     }
+diff --git a/core/io/memory_yield.rs b/core/io/memory_yield.rs
+index 23210a314..7e862c5a1 100644
+--- a/core/io/memory_yield.rs
++++ b/core/io/memory_yield.rs
+@@ -94,6 +94,11 @@ impl IO for MemoryYieldIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn file_id(&self, path: &str) -> Result<super::FileId> {
+         Ok(super::FileId::from_path_hash(path))
+     }
+@@ -252,6 +257,10 @@ mod tests {
+             self.inner.remove_file(path)
+         }
+ 
++        fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++            self.inner.sync_parent_dir(path, c)
++        }
++
+         fn file_id(&self, path: &str) -> Result<super::super::FileId> {
+             self.inner.file_id(path)
+         }
+diff --git a/core/io/mod.rs b/core/io/mod.rs
+index 71bbb1cab..4feb3f772 100644
+--- a/core/io/mod.rs
++++ b/core/io/mod.rs
+@@ -431,6 +431,10 @@ pub trait IO: Clock + Send + Sync {
+     // remove_file is used in the sync-engine
+     fn remove_file(&self, path: &str) -> Result<()>;
+ 
++    /// Make the directory entry for `path` durable by fsyncing its parent
++    /// directory. Returns an unsupported error if this IO cannot provide that.
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion>;
++
+     /// Whether this IO backend can back host-filesystem shared WAL coordination.
+     fn supports_shared_wal_coordination(&self) -> bool {
+         false
+diff --git a/core/io/unix.rs b/core/io/unix.rs
+index 43a904c55..5b58f0d88 100644
+--- a/core/io/unix.rs
++++ b/core/io/unix.rs
+@@ -77,6 +77,12 @@ impl IO for UnixIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        common::fsync_parent_dir(path).map_err(|e| io_error(e, "sync_parent_dir"))?;
++        c.complete(0);
++        Ok(c)
++    }
++
+     #[instrument(err, skip_all, level = Level::TRACE)]
+     fn step(&self) -> Result<()> {
+         Ok(())
+diff --git a/core/io/vfs.rs b/core/io/vfs.rs
+index 705381b87..4d630907b 100644
+--- a/core/io/vfs.rs
++++ b/core/io/vfs.rs
+@@ -45,6 +45,10 @@ impl IO for VfsMod {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, _c: Completion) -> Result<Completion> {
++        Err(LimboError::IoExtensionUnsupported("sync_parent_dir"))
++    }
++
+     fn step(&self) -> Result<()> {
+         if self.ctx.is_null() {
+             return Err(LimboError::ExtensionError("VFS is null".to_string()));
+diff --git a/core/io/win_iocp.rs b/core/io/win_iocp.rs
+index 1e106324f..8b06a9d41 100644
+--- a/core/io/win_iocp.rs
++++ b/core/io/win_iocp.rs
+@@ -393,6 +393,14 @@ impl IO for WindowsIOCP {
+         std::fs::remove_file(file_path).map_err(|e| io_error(e, "remove-file"))
+     }
+ 
++    // NTFS records a file's directory entry in its metadata log, and
++    // FlushFileBuffers on the file flushes that log, so syncing the file is
++    // enough. SQLite's os_win.c never syncs directories for the same reason.
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     #[instrument(err, skip_all, level = Level::TRACE)]
+     fn cancel(&self, completions: &[Completion]) -> Result<()> {
+         for cmpl in completions {
+diff --git a/core/io/windows.rs b/core/io/windows.rs
+index 6bd391f96..432b299bc 100644
+--- a/core/io/windows.rs
++++ b/core/io/windows.rs
+@@ -201,6 +201,14 @@ impl IO for WindowsIO {
+         Ok(())
+     }
+ 
++    // NTFS records a file's directory entry in its metadata log, and
++    // FlushFileBuffers on the file flushes that log, so syncing the file is
++    // enough. SQLite's os_win.c never syncs directories for the same reason.
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     #[instrument(err, skip_all, level = Level::TRACE)]
+     fn step(&self) -> Result<()> {
+         Ok(())
+diff --git a/core/lib.rs b/core/lib.rs
+index 6bb8d7a07..998dd8bda 100644
+--- a/core/lib.rs
++++ b/core/lib.rs
+@@ -34,6 +34,8 @@ pub mod mvcc;
+ pub mod native_ext;
+ #[cfg(any(feature = "fuzz", feature = "bench"))]
+ pub mod numeric;
++#[cfg(all(test, feature = "fs"))]
++mod orphan_wal_tests;
+ pub mod schema;
+ pub mod skiplist;
+ pub mod state_machine;
+@@ -128,9 +130,9 @@ pub(crate) use connection::{AtomicTransactionState, TransactionState};
+ pub use database::{clear_database_registry, SharedWalTestingSnapshot};
+ pub(crate) use database::{is_memory_like, DatabaseCatalog, InitState};
+ pub use database::{
+-    ConnectAsyncState, Database, DatabaseAllocators, DatabaseOpts, EncryptionOpts,
+-    OpenDbAsyncPhase, OpenDbAsyncState, OpenOptions, SharedWalCoordinationOpenTelemetryMode,
+-    SharedWalOpenTelemetry,
++    ConnectAsyncState, Database, DatabaseAllocators, DatabaseOpts, EmptyDb, EncryptionOpts,
++    OpenDbAsyncPhase, OpenDbAsyncState, OpenOptions, OrphanWalPolicy, ReadOnlyOrphanWal,
++    SharedWalCoordinationOpenTelemetryMode, SharedWalOpenTelemetry,
+ };
+ #[cfg(test)]
+ pub(crate) use database::{DatabaseKey, RegistryEntry, DATABASE_MANAGER};
+diff --git a/core/mvcc/database/group_commit_sync_mode_tests.rs b/core/mvcc/database/group_commit_sync_mode_tests.rs
+index cb55105df..1dca17417 100644
+--- a/core/mvcc/database/group_commit_sync_mode_tests.rs
++++ b/core/mvcc/database/group_commit_sync_mode_tests.rs
+@@ -91,6 +91,9 @@ impl IO for SyncCountingIo {
+     fn remove_file(&self, path: &str) -> Result<()> {
+         self.inner.remove_file(path)
+     }
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        self.inner.sync_parent_dir(path, c)
++    }
+     fn file_id(&self, path: &str) -> Result<FileId> {
+         self.inner.file_id(path)
+     }
+diff --git a/core/orphan_wal_tests.rs b/core/orphan_wal_tests.rs
+new file mode 100644
+index 000000000..7ab1b9205
+--- /dev/null
++++ b/core/orphan_wal_tests.rs
+@@ -0,0 +1,805 @@
++use super::*;
++use crate::io::{FileId, FileSyncType};
++use crate::storage::sqlite3_ondisk::DatabaseHeader;
++use std::path::{Path, PathBuf};
++#[cfg(all(
++    host_shared_wal,
++    any(not(target_os = "windows"), feature = "experimental_win_iocp")
++))]
++use std::process::Command;
++use std::sync::{Mutex, OnceLock};
++
++#[cfg(all(
++    host_shared_wal,
++    any(not(target_os = "windows"), feature = "experimental_win_iocp")
++))]
++const MULTIPROCESS_HOLD_OPEN_CHILD_TEST: &str =
++    "orphan_wal_tests::multiprocess_hold_open_child_process";
++
++const DISCARD_ZERO_BYTES: OrphanWalPolicy = OrphanWalPolicy::Discard {
++    empty: EmptyDb::ZeroBytes,
++    read_only: ReadOnlyOrphanWal::Ignore,
++};
++const DISCARD_ONE_BYTE: OrphanWalPolicy = OrphanWalPolicy::Discard {
++    empty: EmptyDb::OneByte,
++    read_only: ReadOnlyOrphanWal::Ignore,
++};
++const DISCARD_INVALID_HEADER: OrphanWalPolicy = OrphanWalPolicy::Discard {
++    empty: EmptyDb::InvalidHeader,
++    read_only: ReadOnlyOrphanWal::Ignore,
++};
++const OLD_TABLES: [&str; 3] = ["old_t", "old_u", "old_v"];
++
++#[test]
++fn replay_policy_keeps_upstream_open_behaviour() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, None, Some(orphan_wal()));
++    let io = RecordingIo::new(&paths, true);
++
++    let db = open_db(
++        io.clone(),
++        &paths,
++        OpenFlags::default(),
++        OrphanWalPolicy::Replay,
++    )
++    .unwrap();
++    let conn = db.connect().unwrap();
++    assert!(table_names(&conn).is_empty());
++    assert_eq!(io.count(IoEvent::RemoveFile), 1);
++    assert_eq!(io.count(IoEvent::DbSync), 0);
++    assert_eq!(io.count(IoEvent::ParentDirSync), 0);
++
++    rollback_create_table(&conn);
++    assert_eq!(file_len(&paths.db), 4096);
++    assert_eq!(io.count(IoEvent::DbSync), 1);
++    assert_eq!(io.count(IoEvent::ParentDirSync), 0);
++    assert!(table_names(&db.connect().unwrap()).is_empty());
++    drop(conn);
++    drop(db);
++
++    let db = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::default(),
++        OrphanWalPolicy::Replay,
++    )
++    .unwrap();
++    let conn = db.connect().unwrap();
++    assert!(table_names(&conn).is_empty());
++    assert_eq!(integrity_check(&conn), "ok");
++}
++
++#[test]
++fn zero_bytes_rule_discards_wal_beside_absent_or_zero_byte_db() {
++    for db_contents in [None, Some(&[][..])] {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = DbPaths::new(dir.path());
++        place_files(&paths, db_contents, Some(orphan_wal()));
++        let io = RecordingIo::new(&paths, true);
++
++        let db = open_db(io.clone(), &paths, OpenFlags::default(), DISCARD_ZERO_BYTES).unwrap();
++        assert_eq!(file_len(&paths.wal), 0);
++        assert_eq!(io.count(IoEvent::RemoveFile), 0);
++        let conn = db.connect().unwrap();
++        assert!(table_names(&conn).is_empty());
++        rollback_create_table(&conn);
++        assert!(table_names(&db.connect().unwrap()).is_empty());
++        drop(conn);
++        drop(db);
++
++        assert_reopens_empty(&paths, DISCARD_ZERO_BYTES);
++    }
++}
++
++#[test]
++fn zero_bytes_rule_keeps_wal_beside_one_byte_db() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, Some(&[0]), Some(orphan_wal()));
++
++    let result = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::default(),
++        DISCARD_ZERO_BYTES,
++    );
++    drop(result);
++    assert_eq!(std::fs::read(&paths.db).unwrap(), vec![0]);
++    assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++}
++
++#[test]
++fn one_byte_rule_discards_wal_beside_one_byte_db() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, Some(&[0]), Some(orphan_wal()));
++
++    let db = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::default(),
++        DISCARD_ONE_BYTE,
++    )
++    .unwrap();
++    assert_eq!(file_len(&paths.db), 0);
++    assert_eq!(file_len(&paths.wal), 0);
++    let conn = db.connect().unwrap();
++    assert!(table_names(&conn).is_empty());
++    rollback_create_table(&conn);
++    drop(conn);
++    drop(db);
++
++    assert_reopens_empty(&paths, DISCARD_ONE_BYTE);
++}
++
++#[test]
++fn invalid_header_rule_truncates_zeroed_db_with_or_without_wal() {
++    for wal in [Some(orphan_wal()), None] {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = DbPaths::new(dir.path());
++        place_files(&paths, Some(&[0; 4096]), wal);
++
++        let db = open_db(
++            platform_io(),
++            &paths,
++            OpenFlags::default(),
++            DISCARD_INVALID_HEADER,
++        )
++        .unwrap();
++        assert_eq!(file_len(&paths.db), 0);
++        assert_eq!(file_len(&paths.wal), 0);
++        let conn = db.connect().unwrap();
++        assert!(table_names(&conn).is_empty());
++        drop(conn);
++        drop(db);
++
++        assert_reopens_empty(&paths, DISCARD_INVALID_HEADER);
++    }
++}
++
++#[test]
++fn invalid_header_rule_treats_db_shorter_than_512_bytes_as_invalid() {
++    let mut short_db = vec![0u8; 200];
++    short_db[..DatabaseHeader::SIZE]
++        .copy_from_slice(bytemuck::bytes_of(&DatabaseHeader::default()));
++
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, Some(&short_db), Some(orphan_wal()));
++    let result = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::default(),
++        DISCARD_ONE_BYTE,
++    );
++    drop(result);
++    assert_eq!(std::fs::read(&paths.db).unwrap(), short_db);
++    assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++
++    let err = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::ReadOnly,
++        DISCARD_INVALID_HEADER,
++    )
++    .expect_err("a read-only open of a db shorter than 512 bytes must fail");
++    assert!(matches!(err, LimboError::Corrupt(_)), "{err:?}");
++    assert_eq!(std::fs::read(&paths.db).unwrap(), short_db);
++    assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++
++    let db = open_db(
++        platform_io(),
++        &paths,
++        OpenFlags::default(),
++        DISCARD_INVALID_HEADER,
++    )
++    .unwrap();
++    assert_eq!(file_len(&paths.db), 0);
++    assert_eq!(file_len(&paths.wal), 0);
++    assert!(table_names(&db.connect().unwrap()).is_empty());
++}
++
++#[test]
++fn valid_db_with_wal_replays_under_every_empty_db_rule() {
++    let source = tempfile::tempdir().unwrap();
++    let source_paths = DbPaths::new(source.path());
++    let (db_bytes, wal_bytes) = {
++        let db = open_db(
++            platform_io(),
++            &source_paths,
++            OpenFlags::default(),
++            OrphanWalPolicy::Replay,
++        )
++        .unwrap();
++        let conn = db.connect().unwrap();
++        conn.execute("CREATE TABLE kept(x)").unwrap();
++        conn.execute("INSERT INTO kept VALUES (1), (2), (3)")
++            .unwrap();
++        (
++            std::fs::read(&source_paths.db).unwrap(),
++            std::fs::read(&source_paths.wal).unwrap(),
++        )
++    };
++    assert!(!wal_bytes.is_empty());
++
++    for policy in [DISCARD_ZERO_BYTES, DISCARD_ONE_BYTE, DISCARD_INVALID_HEADER] {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = DbPaths::new(dir.path());
++        place_files(&paths, Some(&db_bytes), Some(&wal_bytes));
++
++        let db = open_db(platform_io(), &paths, OpenFlags::default(), policy).unwrap();
++        let conn = db.connect().unwrap();
++        assert_eq!(table_names(&conn), vec!["kept".to_string()], "{policy:?}");
++        assert_eq!(query_i64(&conn, "SELECT count(*) FROM kept"), 3);
++        assert_eq!(integrity_check(&conn), "ok");
++    }
++}
++
++#[test]
++fn read_only_ignore_reads_empty_and_leaves_files_untouched() {
++    for (db_contents, empty) in [(&[][..], EmptyDb::ZeroBytes), (&[0][..], EmptyDb::OneByte)] {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = DbPaths::new(dir.path());
++        place_files(&paths, Some(db_contents), Some(orphan_wal()));
++        let policy = OrphanWalPolicy::Discard {
++            empty,
++            read_only: ReadOnlyOrphanWal::Ignore,
++        };
++
++        let db = open_db(platform_io(), &paths, OpenFlags::ReadOnly, policy).unwrap();
++        let conn = db.connect().unwrap();
++        assert!(table_names(&conn).is_empty(), "{empty:?}");
++        drop(conn);
++        drop(db);
++
++        assert_eq!(std::fs::read(&paths.db).unwrap(), db_contents);
++        assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++    }
++}
++
++#[test]
++fn read_only_replay_matches_replay_policy() {
++    let discard_read_only_replay = OrphanWalPolicy::Discard {
++        empty: EmptyDb::ZeroBytes,
++        read_only: ReadOnlyOrphanWal::Replay,
++    };
++    let outcomes: Vec<_> = [OrphanWalPolicy::Replay, discard_read_only_replay]
++        .into_iter()
++        .map(|policy| {
++            let dir = tempfile::tempdir().unwrap();
++            let paths = DbPaths::new(dir.path());
++            place_files(&paths, Some(&[]), Some(orphan_wal()));
++            let db = open_db(platform_io(), &paths, OpenFlags::ReadOnly, policy).unwrap();
++            let tables = table_names(&db.connect().unwrap());
++            drop(db);
++            (
++                tables,
++                std::fs::read(&paths.db).unwrap(),
++                std::fs::read(&paths.wal).unwrap() == orphan_wal(),
++            )
++        })
++        .collect();
++    assert_eq!(outcomes[0], outcomes[1]);
++}
++
++#[test]
++fn read_only_open_of_invalid_header_db_fails_without_touching_files() {
++    for read_only in [ReadOnlyOrphanWal::Ignore, ReadOnlyOrphanWal::Replay] {
++        for db_contents in [&[0; 4096][..], &[7; 50][..], &[0][..]] {
++            let dir = tempfile::tempdir().unwrap();
++            let paths = DbPaths::new(dir.path());
++            place_files(&paths, Some(db_contents), Some(orphan_wal()));
++            let policy = OrphanWalPolicy::Discard {
++                empty: EmptyDb::InvalidHeader,
++                read_only,
++            };
++
++            let err = open_db(platform_io(), &paths, OpenFlags::ReadOnly, policy)
++                .expect_err("a read-only open of a db with an invalid header must fail");
++            assert!(
++                matches!(err, LimboError::Corrupt(ref msg) if msg.contains("valid database header")),
++                "{err:?}"
++            );
++            assert_eq!(std::fs::read(&paths.db).unwrap(), db_contents);
++            assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++        }
++    }
++}
++
++#[test]
++fn discard_syncs_db_file_and_parent_dir_before_first_wal_write() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, None, Some(orphan_wal()));
++    let io = RecordingIo::new(&paths, true);
++
++    let db = open_db(io.clone(), &paths, OpenFlags::default(), DISCARD_ZERO_BYTES).unwrap();
++    let conn = db.connect().unwrap();
++    io.clear();
++    conn.execute("CREATE TABLE t(x)").unwrap();
++
++    let events = io.events();
++    let first_wal_write = events
++        .iter()
++        .position(|event| *event == IoEvent::WalWrite)
++        .expect("the commit must write the WAL");
++    assert_eq!(
++        &events[..first_wal_write],
++        &[IoEvent::DbWrite, IoEvent::DbSync, IoEvent::ParentDirSync]
++    );
++}
++
++#[test]
++fn discard_fails_open_of_empty_db_when_io_cannot_sync_parent_dir() {
++    let dir = tempfile::tempdir().unwrap();
++    let empty_paths = DbPaths::new(dir.path());
++    let io = RecordingIo::new(&empty_paths, false);
++
++    let err = open_db(
++        io.clone(),
++        &empty_paths,
++        OpenFlags::default(),
++        DISCARD_ZERO_BYTES,
++    )
++    .expect_err("Discard must refuse an IO that cannot sync the parent directory");
++    assert!(
++        matches!(err, LimboError::InvalidArgument(ref msg) if msg.contains("sync_parent_dir")),
++        "{err:?}"
++    );
++
++    let filled_paths = DbPaths {
++        db: dir.path().join("filled.db"),
++        wal: dir.path().join("filled.db-wal"),
++    };
++    {
++        let db = open_db(
++            io.clone(),
++            &filled_paths,
++            OpenFlags::default(),
++            OrphanWalPolicy::Replay,
++        )
++        .unwrap();
++        db.connect()
++            .unwrap()
++            .execute("CREATE TABLE kept(x)")
++            .unwrap();
++    }
++    let db = open_db(io, &filled_paths, OpenFlags::default(), DISCARD_ZERO_BYTES).unwrap();
++    assert_eq!(
++        table_names(&db.connect().unwrap()),
++        vec!["kept".to_string()]
++    );
++}
++
++#[test]
++fn discard_fails_registry_bypassing_open_without_touching_files() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, Some(&[]), Some(orphan_wal()));
++    let io = platform_io();
++    let path = paths.db.to_str().unwrap();
++
++    for policy in [DISCARD_ZERO_BYTES, DISCARD_ONE_BYTE, DISCARD_INVALID_HEADER] {
++        let err = open_bypassing_registry(io.clone(), path, policy)
++            .expect_err("Discard must refuse an open that skips the registry");
++        assert!(
++            matches!(err, LimboError::InvalidArgument(ref msg) if msg.contains("registry")),
++            "{err:?}"
++        );
++        assert_eq!(file_len(&paths.db), 0);
++        assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++    }
++
++    let db = open_bypassing_registry(io, path, OrphanWalPolicy::Replay).unwrap();
++    assert!(table_names(&db.connect().unwrap()).is_empty());
++}
++
++#[cfg(feature = "conn_raw_api")]
++#[test]
++fn discard_fails_do_open_before_creating_db_file() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++
++    let err = Database::do_open(
++        platform_io(),
++        paths.db.to_str().unwrap(),
++        OpenOptions::new(Arc::new(SqliteDialect))
++            .db_opts(DatabaseOpts::new().with_orphan_wal_policy(DISCARD_ZERO_BYTES)),
++    )
++    .expect_err("Discard must refuse an open that skips the registry");
++    assert!(
++        matches!(err, LimboError::InvalidArgument(ref msg) if msg.contains("registry")),
++        "{err:?}"
++    );
++    assert!(!paths.db.exists());
++    assert!(!paths.wal.exists());
++}
++
++#[cfg(all(
++    host_shared_wal,
++    any(not(target_os = "windows"), feature = "experimental_win_iocp")
++))]
++#[test]
++fn multiprocess_discard_fails_when_another_process_is_attached() {
++    let dir = tempfile::tempdir().unwrap();
++    let paths = DbPaths::new(dir.path());
++    place_files(&paths, Some(&[]), None);
++    let ready_file = dir.path().join("child-ready");
++    let release_file = dir.path().join("child-release");
++
++    let mut child = Command::new(std::env::current_exe().unwrap())
++        .arg(MULTIPROCESS_HOLD_OPEN_CHILD_TEST)
++        .arg("--exact")
++        .arg("--nocapture")
++        .env("TURSO_ORPHAN_WAL_DB_PATH", &paths.db)
++        .env("TURSO_ORPHAN_WAL_READY_FILE", &ready_file)
++        .env("TURSO_ORPHAN_WAL_RELEASE_FILE", &release_file)
++        .spawn()
++        .unwrap();
++    wait_for_file(&ready_file);
++    std::fs::write(&paths.wal, orphan_wal()).unwrap();
++
++    let result = Database::open_file_with_flags(
++        platform_io(),
++        paths.db.to_str().unwrap(),
++        OpenFlags::default(),
++        DatabaseOpts::new()
++            .with_multiprocess_wal(true)
++            .with_orphan_wal_policy(DISCARD_ZERO_BYTES),
++        None,
++        Arc::new(SqliteDialect),
++    );
++
++    std::fs::write(&release_file, b"release").unwrap();
++    assert!(child.wait().unwrap().success());
++    let err = result.expect_err("Discard must not touch files another process is attached to");
++    assert!(
++        matches!(err, LimboError::LockingError(ref msg) if msg.contains("orphan WAL")),
++        "{err:?}"
++    );
++    assert_eq!(file_len(&paths.db), 0);
++    assert_eq!(std::fs::read(&paths.wal).unwrap(), orphan_wal());
++}
++
++#[cfg(all(
++    host_shared_wal,
++    any(not(target_os = "windows"), feature = "experimental_win_iocp")
++))]
++#[test]
++fn multiprocess_hold_open_child_process() {
++    let Some(db_path) = std::env::var_os("TURSO_ORPHAN_WAL_DB_PATH") else {
++        return;
++    };
++    let ready_file = PathBuf::from(std::env::var_os("TURSO_ORPHAN_WAL_READY_FILE").unwrap());
++    let release_file = PathBuf::from(std::env::var_os("TURSO_ORPHAN_WAL_RELEASE_FILE").unwrap());
++
++    let db = Database::open_file_with_flags(
++        platform_io(),
++        db_path.to_str().unwrap(),
++        OpenFlags::default(),
++        DatabaseOpts::new().with_multiprocess_wal(true),
++        None,
++        Arc::new(SqliteDialect),
++    )
++    .unwrap();
++
++    std::fs::write(&ready_file, b"ready").unwrap();
++    wait_for_file(&release_file);
++    drop(db);
++}
++
++struct DbPaths {
++    db: PathBuf,
++    wal: PathBuf,
++}
++
++impl DbPaths {
++    fn new(dir: &Path) -> Self {
++        Self {
++            db: dir.join("g.db"),
++            wal: dir.join("g.db-wal"),
++        }
++    }
++}
++
++fn orphan_wal() -> &'static [u8] {
++    static ORPHAN_WAL: OnceLock<Vec<u8>> = OnceLock::new();
++    ORPHAN_WAL.get_or_init(|| {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = DbPaths::new(dir.path());
++        let db = Database::open_file(
++            platform_io(),
++            paths.db.to_str().unwrap(),
++            Arc::new(SqliteDialect),
++        )
++        .unwrap();
++        let conn = db.connect().unwrap();
++        conn.execute("CREATE TABLE old_t(x, b)").unwrap();
++        conn.execute("CREATE TABLE old_u(z)").unwrap();
++        conn.execute("CREATE TABLE old_v(w)").unwrap();
++        for i in 0..300 {
++            conn.execute(format!("INSERT INTO old_t VALUES ({i}, randomblob(200))"))
++                .unwrap();
++            conn.execute("INSERT INTO old_v VALUES (randomblob(300))")
++                .unwrap();
++        }
++        assert_eq!(table_names(&conn), OLD_TABLES);
++        let wal = std::fs::read(&paths.wal).unwrap();
++        assert!(wal.len() > 2_000_000, "WAL holds {} bytes", wal.len());
++        wal
++    })
++}
++
++fn place_files(paths: &DbPaths, db_contents: Option<&[u8]>, wal_contents: Option<&[u8]>) {
++    for (path, contents) in [(&paths.db, db_contents), (&paths.wal, wal_contents)] {
++        match contents {
++            Some(contents) => std::fs::write(path, contents).unwrap(),
++            None => assert!(!path.exists()),
++        }
++    }
++}
++
++fn platform_io() -> Arc<dyn IO> {
++    Arc::new(PlatformIO::new().unwrap())
++}
++
++fn open_db(
++    io: Arc<dyn IO>,
++    paths: &DbPaths,
++    flags: OpenFlags,
++    policy: OrphanWalPolicy,
++) -> Result<Arc<Database>> {
++    Database::open_file_with_flags(
++        io,
++        paths.db.to_str().unwrap(),
++        flags,
++        DatabaseOpts::new().with_orphan_wal_policy(policy),
++        None,
++        Arc::new(SqliteDialect),
++    )
++}
++
++fn open_bypassing_registry(
++    io: Arc<dyn IO>,
++    path: &str,
++    policy: OrphanWalPolicy,
++) -> Result<Arc<Database>> {
++    let file = io.open_file(path, OpenFlags::default(), true)?;
++    let options = OpenOptions::new(Arc::new(SqliteDialect))
++        .storage(Arc::new(crate::storage::database::DatabaseFile::new(file)))
++        .db_opts(DatabaseOpts::new().with_orphan_wal_policy(policy));
++    let mut state = OpenDbAsyncState::new();
++    loop {
++        match Database::do_open_async(&mut state, io.clone(), path, &options)? {
++            IOResult::Done(db) => return Ok(db),
++            IOResult::IO(completion) => completion.wait(&*io)?,
++        }
++    }
++}
++
++fn rollback_create_table(conn: &Arc<Connection>) {
++    conn.execute("BEGIN").unwrap();
++    conn.execute("CREATE TABLE z(q)").unwrap();
++    conn.execute("ROLLBACK").unwrap();
++}
++
++fn assert_reopens_empty(paths: &DbPaths, policy: OrphanWalPolicy) {
++    let db = open_db(platform_io(), paths, OpenFlags::default(), policy).unwrap();
++    let conn = db.connect().unwrap();
++    assert!(table_names(&conn).is_empty());
++    assert_eq!(integrity_check(&conn), "ok");
++}
++
++fn table_names(conn: &Arc<Connection>) -> Vec<String> {
++    query_rows(conn, "SELECT name FROM sqlite_schema ORDER BY name")
++        .into_iter()
++        .map(|row| row[0].to_text().unwrap().to_string())
++        .collect()
++}
++
++fn integrity_check(conn: &Arc<Connection>) -> String {
++    query_rows(conn, "PRAGMA integrity_check")[0][0]
++        .to_text()
++        .unwrap()
++        .to_string()
++}
++
++fn query_i64(conn: &Arc<Connection>, sql: &str) -> i64 {
++    match query_rows(conn, sql)[0][0] {
++        Value::Numeric(Numeric::Integer(value)) => value,
++        ref other => panic!("expected an integer from {sql}, got {other:?}"),
++    }
++}
++
++fn query_rows(conn: &Arc<Connection>, sql: &str) -> Vec<Vec<Value>> {
++    let mut stmt = conn.prepare(sql).unwrap();
++    let mut rows = Vec::new();
++    stmt.run_with_row_callback(|row| {
++        rows.push(row.get_values().cloned().collect());
++        Ok(())
++    })
++    .unwrap();
++    rows
++}
++
++fn file_len(path: &Path) -> u64 {
++    std::fs::metadata(path).unwrap().len()
++}
++
++#[cfg(all(
++    host_shared_wal,
++    any(not(target_os = "windows"), feature = "experimental_win_iocp")
++))]
++fn wait_for_file(path: &Path) {
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++    while !path.exists() {
++        assert!(
++            std::time::Instant::now() < deadline,
++            "timed out waiting for {}",
++            path.display()
++        );
++        std::thread::sleep(std::time::Duration::from_millis(10));
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum IoEvent {
++    DbWrite,
++    DbSync,
++    WalWrite,
++    ParentDirSync,
++    RemoveFile,
++}
++
++struct RecordingIo {
++    inner: Arc<dyn IO>,
++    db_path: String,
++    wal_path: String,
++    supports_parent_dir_sync: bool,
++    events: Arc<Mutex<Vec<IoEvent>>>,
++}
++
++impl RecordingIo {
++    fn new(paths: &DbPaths, supports_parent_dir_sync: bool) -> Arc<Self> {
++        Arc::new(Self {
++            inner: platform_io(),
++            db_path: paths.db.to_str().unwrap().to_string(),
++            wal_path: paths.wal.to_str().unwrap().to_string(),
++            supports_parent_dir_sync,
++            events: Arc::new(Mutex::new(Vec::new())),
++        })
++    }
++
++    fn events(&self) -> Vec<IoEvent> {
++        self.events.lock().unwrap().clone()
++    }
++
++    fn count(&self, event: IoEvent) -> usize {
++        self.events().into_iter().filter(|e| *e == event).count()
++    }
++
++    fn clear(&self) {
++        self.events.lock().unwrap().clear();
++    }
++}
++
++impl Clock for RecordingIo {
++    fn current_time_monotonic(&self) -> MonotonicInstant {
++        self.inner.current_time_monotonic()
++    }
++
++    fn current_time_wall_clock(&self) -> WallClockInstant {
++        self.inner.current_time_wall_clock()
++    }
++}
++
++impl IO for RecordingIo {
++    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Arc<dyn File>> {
++        let inner = self.inner.open_file(path, flags, direct)?;
++        let kind = if path == self.db_path {
++            RecordedFile::Db
++        } else if path == self.wal_path {
++            RecordedFile::Wal
++        } else {
++            RecordedFile::Other
++        };
++        Ok(Arc::new(RecordingFile {
++            inner,
++            kind,
++            events: self.events.clone(),
++        }))
++    }
++
++    fn remove_file(&self, path: &str) -> Result<()> {
++        self.events.lock().unwrap().push(IoEvent::RemoveFile);
++        self.inner.remove_file(path)
++    }
++
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        if !self.supports_parent_dir_sync {
++            return Err(LimboError::IoExtensionUnsupported("sync_parent_dir"));
++        }
++        self.events.lock().unwrap().push(IoEvent::ParentDirSync);
++        self.inner.sync_parent_dir(path, c)
++    }
++
++    fn step(&self) -> Result<()> {
++        self.inner.step()
++    }
++
++    fn drain_completions(&self, completions: &[Completion]) -> Result<()> {
++        self.inner.drain_completions(completions)
++    }
++
++    fn cancel(&self, completions: &[Completion]) -> Result<()> {
++        self.inner.cancel(completions)
++    }
++
++    fn file_id(&self, path: &str) -> Result<FileId> {
++        self.inner.file_id(path)
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum RecordedFile {
++    Db,
++    Wal,
++    Other,
++}
++
++struct RecordingFile {
++    inner: Arc<dyn File>,
++    kind: RecordedFile,
++    events: Arc<Mutex<Vec<IoEvent>>>,
++}
++
++impl RecordingFile {
++    fn record_write(&self) {
++        let event = match self.kind {
++            RecordedFile::Db => IoEvent::DbWrite,
++            RecordedFile::Wal => IoEvent::WalWrite,
++            RecordedFile::Other => return,
++        };
++        self.events.lock().unwrap().push(event);
++    }
++}
++
++impl File for RecordingFile {
++    fn lock_file(&self, exclusive: bool) -> Result<()> {
++        self.inner.lock_file(exclusive)
++    }
++
++    fn unlock_file(&self) -> Result<()> {
++        self.inner.unlock_file()
++    }
++
++    fn pread(&self, pos: u64, c: Completion) -> Result<Completion> {
++        self.inner.pread(pos, c)
++    }
++
++    fn pwrite(&self, pos: u64, buffer: Arc<Buffer>, c: Completion) -> Result<Completion> {
++        self.record_write();
++        self.inner.pwrite(pos, buffer, c)
++    }
++
++    fn pwritev(&self, pos: u64, buffers: Vec<Arc<Buffer>>, c: Completion) -> Result<Completion> {
++        self.record_write();
++        self.inner.pwritev(pos, buffers, c)
++    }
++
++    fn sync(&self, c: Completion, sync_type: FileSyncType) -> Result<Completion> {
++        if self.kind == RecordedFile::Db {
++            self.events.lock().unwrap().push(IoEvent::DbSync);
++        }
++        self.inner.sync(c, sync_type)
++    }
++
++    fn size(&self) -> Result<u64> {
++        self.inner.size()
++    }
++
++    fn truncate(&self, len: u64, c: Completion) -> Result<Completion> {
++        self.inner.truncate(len, c)
++    }
++}
+diff --git a/core/storage/pager.rs b/core/storage/pager.rs
+index 383a905d9..bbdb1ef47 100644
+--- a/core/storage/pager.rs
++++ b/core/storage/pager.rs
+@@ -1578,6 +1578,7 @@ pub struct SharedPagerState {
+     init_lock: Mutex<()>,
+     init_page_1: ArcSwapOption<Page>,
+     page_size: AtomicU32,
++    parent_dir_to_sync_after_page1: Option<String>,
+ }
+ 
+ impl SharedPagerState {
+@@ -1592,9 +1593,15 @@ impl SharedPagerState {
+             init_lock: Mutex::new(()),
+             init_page_1: ArcSwapOption::new(init_page_1),
+             page_size: AtomicU32::new(page_size),
++            parent_dir_to_sync_after_page1: None,
+         }
+     }
+ 
++    pub(crate) fn sync_parent_dir_after_page1(mut self, db_path: String) -> Self {
++        self.parent_dir_to_sync_after_page1 = Some(db_path);
++        self
++    }
++
+     pub(crate) fn initialized(&self) -> bool {
+         self.init_page_1.load().is_none()
+     }
+@@ -1832,6 +1839,9 @@ enum AllocatePage1State {
+     Syncing {
+         page: PageRef,
+     },
++    SyncingParentDir {
++        page: PageRef,
++    },
+     Done,
+ }
+ 
+@@ -5730,7 +5740,7 @@ impl Pager {
+             AllocatePage1State::Writing { page } => {
+                 turso_assert!(page.is_loaded(), "page should be loaded");
+                 tracing::trace!("allocate_page1(Writing done)");
+-                if self.wal.is_some() {
++                if self.wal.is_some() || self.shared.parent_dir_to_sync_after_page1.is_some() {
+                     // Fsync page 1 to the main database file before any commit
+                     // can fsync frames into the WAL. This keeps the invariant
+                     // "a WAL exists ⇒ the database file has at least one page"
+@@ -5752,6 +5762,18 @@ impl Pager {
+             }
+             AllocatePage1State::Syncing { page } => {
+                 tracing::trace!("allocate_page1(Syncing done)");
++                if let Some(db_path) = &self.shared.parent_dir_to_sync_after_page1 {
++                    let c = self
++                        .io
++                        .sync_parent_dir(db_path, Completion::new_sync(|_| {}))?;
++                    *self.allocate_page1_state.write() =
++                        AllocatePage1State::SyncingParentDir { page };
++                    io_yield_one!(c);
++                }
++                self.finish_allocate_page1(page)
++            }
++            AllocatePage1State::SyncingParentDir { page } => {
++                tracing::trace!("allocate_page1(SyncingParentDir done)");
+                 self.finish_allocate_page1(page)
+             }
+             AllocatePage1State::Done => unreachable!("cannot try to allocate page 1 again"),
+@@ -5777,7 +5799,9 @@ impl Pager {
+     pub fn allocating_page1(&self) -> bool {
+         matches!(
+             *self.allocate_page1_state.read(),
+-            AllocatePage1State::Writing { .. } | AllocatePage1State::Syncing { .. }
++            AllocatePage1State::Writing { .. }
++                | AllocatePage1State::Syncing { .. }
++                | AllocatePage1State::SyncingParentDir { .. }
+         )
+     }
+ 
+diff --git a/core/vdbe/statement_lifecycle_tests.rs b/core/vdbe/statement_lifecycle_tests.rs
+index 296452198..d58bf16f0 100644
+--- a/core/vdbe/statement_lifecycle_tests.rs
++++ b/core/vdbe/statement_lifecycle_tests.rs
+@@ -296,6 +296,14 @@ impl crate::IO for NoPumpInsideStepIo {
+         self.inner.remove_file(path)
+     }
+ 
++    fn sync_parent_dir(
++        &self,
++        path: &str,
++        c: crate::Completion,
++    ) -> crate::Result<crate::Completion> {
++        self.inner.sync_parent_dir(path, c)
++    }
++
+     fn step(&self) -> crate::Result<()> {
+         self.note_pump();
+         self.inner.step()
+diff --git a/core/vdbe/vacuum.rs b/core/vdbe/vacuum.rs
+index 99599d3e0..c95e7c062 100644
+--- a/core/vdbe/vacuum.rs
++++ b/core/vdbe/vacuum.rs
+@@ -2494,6 +2494,10 @@ mod tests {
+             self.inner.remove_file(path)
+         }
+ 
++        fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++            self.inner.sync_parent_dir(path, c)
++        }
++
+         fn step(&self) -> Result<()> {
+             self.inner.step()
+         }
+diff --git a/docs/adr/0001-io-extensions-are-required-trait-methods.md b/docs/adr/0001-io-extensions-are-required-trait-methods.md
+new file mode 100644
+index 000000000..b1cd68018
+--- /dev/null
++++ b/docs/adr/0001-io-extensions-are-required-trait-methods.md
+@@ -0,0 +1,51 @@
++---
++status: accepted
++---
++
++# IO extensions are required methods on `IO`
++
++The fork needs capabilities that upstream turso's `IO` trait doesn't
++have. The first is `sync_parent_dir`, which the orphan-WAL discard
++needs: it makes a newly created db file durable before the first WAL
++frame is written. We add each such **IO extension** as a **required**
++method on `IO`, not as a provided method with a default. The
++behaviour of every in-tree impl is known. A compile error then forces
++every other impl, including out-of-tree ones, to decide what the
++capability means for it, rather than silently inheriting a default.
++An impl that can't honestly provide the capability (such as `VfsMod`
++or browser `Opfs` for directory sync) returns an unsupported error,
++and the feature that needs the capability refuses to run rather than
++falling back to a weaker guarantee.
++
++## Considered Options
++
++- **A provided method with an `Unsupported` default**, like the
++  existing `supports_shared_wal_coordination()`. Rejected: an
++  out-of-tree IO would pick up `Unsupported` without anyone deciding
++  it, and the first sign would be a runtime refusal. Upstream is more
++  likely to accept this shape, so it may come back if the extension
++  is proposed upstream.
++- **A single interface reached by a hop**
++  (`fn dir_sync(&self) -> Option<&dyn DirSync>`). Rejected: this pays
++  off only for a group of related capabilities behind one interface,
++  and there is one method. The hop itself still has to go on `IO`,
++  either with a default (the silent opt-out again) or required (the
++  same breaking change plus an extra trait).
++- **COM-style `query_interface(&self, iid) -> Option<..>`** covering
++  many unrelated optional interfaces. Rejected for now: we expect
++  neither many related extensions nor many unrelated ones.
++
++## Consequences
++
++- This fork is maintained by re-implementing each fix from scratch
++  against fresh upstream, so the cost of a required method is that
++  each re-apply touches every `impl IO` in the tree, including any
++  that upstream has added since. It does not create merge conflicts.
++- **Revisit when the extension set grows.** Reconsider
++  `query_interface`, or a single hop interface, once the fork carries
++  two or more IO extensions, or once one of them needs a group of
++  related methods. The current set is listed under "Fork Features" in
++  `README.md`.
++- This ADR was added alongside the change that introduced the first
++  IO extension. It is maintained in the fork's NQAF prompt history;
++  change it there, not by editing this copy.
+diff --git a/postgres/tests/integration/common.rs b/postgres/tests/integration/common.rs
+index 5a8f30f2d..79bdfe214 100644
+--- a/postgres/tests/integration/common.rs
++++ b/postgres/tests/integration/common.rs
+@@ -70,6 +70,14 @@ impl IO for TestIo {
+         self.io.remove_file(path)
+     }
+ 
++    fn sync_parent_dir(
++        &self,
++        path: &str,
++        c: turso_core::Completion,
++    ) -> turso_core::Result<turso_core::Completion> {
++        self.io.sync_parent_dir(path, c)
++    }
++
+     fn file_id(&self, path: &str) -> turso_core::Result<turso_core::io::FileId> {
+         self.io.file_id(path)
+     }
+diff --git a/sync/engine/src/sparse_io.rs b/sync/engine/src/sparse_io.rs
+index 6e1e8371e..510d92f6f 100644
+--- a/sync/engine/src/sparse_io.rs
++++ b/sync/engine/src/sparse_io.rs
+@@ -41,6 +41,19 @@ impl IO for SparseLinuxIo {
+         Ok(())
+     }
+ 
++    #[instrument(err, skip_all, level = Level::TRACE)]
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion> {
++        let parent = match std::path::Path::new(path).parent() {
++            Some(parent) if !parent.as_os_str().is_empty() => parent,
++            _ => std::path::Path::new("."),
++        };
++        std::fs::File::open(parent)
++            .and_then(|dir| dir.sync_all())
++            .map_err(|e| io_error(e, "sync_parent_dir"))?;
++        c.complete(0);
++        Ok(c)
++    }
++
+     #[instrument(err, skip_all, level = Level::TRACE)]
+     fn step(&self) -> Result<()> {
+         Ok(())
+diff --git a/sync/engine/src/wal_session.rs b/sync/engine/src/wal_session.rs
+index 57f15c492..fefaeb244 100644
+--- a/sync/engine/src/wal_session.rs
++++ b/sync/engine/src/wal_session.rs
+@@ -122,6 +122,10 @@ mod tests {
+             self.inner.remove_file(path)
+         }
+ 
++        fn sync_parent_dir(&self, path: &str, c: Completion) -> CoreResult<Completion> {
++            self.inner.sync_parent_dir(path, c)
++        }
++
+         fn file_id(&self, path: &str) -> CoreResult<turso_core::io::FileId> {
+             self.inner.file_id(path)
+         }
+diff --git a/testing/concurrent-simulator/io.rs b/testing/concurrent-simulator/io.rs
+index 449d64728..6e2d1138c 100644
+--- a/testing/concurrent-simulator/io.rs
++++ b/testing/concurrent-simulator/io.rs
+@@ -184,6 +184,11 @@ impl IO for SimulatorIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn step(&self) -> Result<()> {
+         // Complete any pending IO operations
+         let mut pending = self.pending.lock().unwrap();
+diff --git a/testing/differential-oracle/fuzzer/memory/io.rs b/testing/differential-oracle/fuzzer/memory/io.rs
+index 2580eaeac..1fd1f7e9c 100644
+--- a/testing/differential-oracle/fuzzer/memory/io.rs
++++ b/testing/differential-oracle/fuzzer/memory/io.rs
+@@ -6,7 +6,7 @@ use std::sync::Arc;
+ use indexmap::IndexMap;
+ use rand::{Rng, RngCore, SeedableRng};
+ use rand_chacha::ChaCha8Rng;
+-use turso_core::{Clock, IO, MonotonicInstant, OpenFlags, Result, WallClockInstant};
++use turso_core::{Clock, Completion, IO, MonotonicInstant, OpenFlags, Result, WallClockInstant};
+ 
+ use crate::memory::file::MemorySimFile;
+ 
+@@ -129,6 +129,11 @@ impl IO for MemorySimIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn file_id(&self, path: &str) -> Result<turso_core::io::FileId> {
+         Ok(turso_core::io::FileId::from_path_hash(path))
+     }
+diff --git a/testing/simulator/runner/io.rs b/testing/simulator/runner/io.rs
+index 8e231b446..d07fadeca 100644
+--- a/testing/simulator/runner/io.rs
++++ b/testing/simulator/runner/io.rs
+@@ -161,6 +161,14 @@ impl IO for SimulatorIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(
++        &self,
++        path: &str,
++        c: turso_core::Completion,
++    ) -> Result<turso_core::Completion> {
++        self.inner.sync_parent_dir(path, c)
++    }
++
+     fn file_id(&self, path: &str) -> Result<turso_core::io::FileId> {
+         self.inner.file_id(path)
+     }
+diff --git a/testing/simulator/runner/memory/io.rs b/testing/simulator/runner/memory/io.rs
+index bd8c09051..3cc136789 100644
+--- a/testing/simulator/runner/memory/io.rs
++++ b/testing/simulator/runner/memory/io.rs
+@@ -463,6 +463,12 @@ impl IO for MemorySimIO {
+         Ok(())
+     }
+ 
++    fn sync_parent_dir(&self, _path: &str, c: Completion) -> Result<Completion> {
++        self.ensure_io_allowed()?;
++        c.complete(0);
++        Ok(c)
++    }
++
+     fn file_id(&self, path: &str) -> Result<turso_core::io::FileId> {
+         Ok(turso_core::io::FileId::from_path_hash(path))
+     }
+diff --git a/tests/integration/common.rs b/tests/integration/common.rs
+index ded84b7b3..ab2f5326e 100644
+--- a/tests/integration/common.rs
++++ b/tests/integration/common.rs
+@@ -81,6 +81,13 @@ impl IO for TestIo {
+     fn remove_file(&self, path: &str) -> turso_core::Result<()> {
+         self.io.remove_file(path)
+     }
++    fn sync_parent_dir(
++        &self,
++        path: &str,
++        c: turso_core::Completion,
++    ) -> turso_core::Result<turso_core::Completion> {
++        self.io.sync_parent_dir(path, c)
++    }
+     fn file_id(&self, path: &str) -> turso_core::Result<turso_core::io::FileId> {
+         self.io.file_id(path)
+     }
+diff --git a/tests/integration/queued_io.rs b/tests/integration/queued_io.rs
+index 234c5492a..3c1baa2a7 100644
+--- a/tests/integration/queued_io.rs
++++ b/tests/integration/queued_io.rs
+@@ -131,6 +131,10 @@ impl IO for QueuedIo {
+         self.inner.remove_file(path)
+     }
+ 
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> turso_core::Result<Completion> {
++        self.inner.sync_parent_dir(path, c)
++    }
++
+     fn step(&self) -> turso_core::Result<()> {
+         self.step_one().map(|_| ())
+     }
+diff --git a/tests/integration/unreliable_io.rs b/tests/integration/unreliable_io.rs
+index 2ee959716..854fe2652 100644
+--- a/tests/integration/unreliable_io.rs
++++ b/tests/integration/unreliable_io.rs
+@@ -232,6 +232,10 @@ impl IO for UnreliableIo {
+         self.inner.remove_file(path)
+     }
+ 
++    fn sync_parent_dir(&self, path: &str, c: Completion) -> turso_core::Result<Completion> {
++        self.inner.sync_parent_dir(path, c)
++    }
++
+     fn step(&self) -> turso_core::Result<()> {
+         self.inner.step()
+     }
