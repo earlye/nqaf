@@ -1,0 +1,65 @@
+From 3ad193ff73f1009dcf4c1cd5f5b50fcde107c9f1 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 6 Oct 2026 04:05:00 +0000
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md | 32 ++++++++++++++++++++++++++++++++
+ README.md                    |  5 +++++
+ 2 files changed, 37 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 00000000..8263488c
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,32 @@
++# Bootstrap: mark this repo as a fork tracked via NQAF
++
++## Problem [feature-000]
++
++This repo (`fork.txt`) is a straight mirror of `upstream.txt`
++(`performous/performous`) with no indication in the repo itself that it
++carries locally-applied changes, or where to find them.
++
++## Fix
++
++Add a short `# About This Fork` section near the top of `README.md`: after
++the intro block (the description, the website/wiki/Discord links and the
++compiling-instructions line), and before the `# Pre-compiled builds`
++section. Use the same heading level as the README's other sections. State:
++
++- This repository is a fork of the upstream project (link to
++  `https://github.com/performous/performous`).
++- It carries a small set of fork-local changes applied on top of upstream
++  (such as a CI workflow that builds macOS DMGs from feature branches),
++  tracked as prompts rather than as a diverging code history.
++- Anyone re-mirroring this fork from a newer upstream release should look at
++  the prompts that produced the current changes (do not hardcode a path to
++  the `nqaf` repo here — just say "see the fork's NQAF prompt history").
++
++Do not modify the `# Pre-compiled builds` links, which point at upstream's
++releases and nightly builds, or any project/packaging metadata
++(`CMakeLists.txt` `project()`/`CPACK_*` settings, `osx-utils/`, `win32/`,
++`AppImageBuilder.yml`, etc.). This fork is not published under a new name,
++so there is no discoverability problem to solve by rewriting that
++metadata — doing so would be speculative scope creep.
++
++Do not make any other changes.
+diff --git a/README.md b/README.md
+index 6fb6d917..7fa87f3d 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,11 @@ Discord at https://discord.gg/NS3m3ad
+ 
+ For compiling instructions visit the wiki page: https://github.com/performous/performous/wiki/Building-and-installing-from-source
+ 
++# About This Fork
++This repository is a fork of the upstream [Performous](https://github.com/performous/performous) project. It carries a small set of fork-local changes applied on top of upstream (such as a CI workflow that builds macOS DMGs from feature branches), tracked as prompts rather than as a diverging code history.
++
++If you are re-mirroring this fork from a newer upstream release, see the fork's NQAF prompt history for the prompts that produced the current changes, and re-apply them.
++
+ # Pre-compiled builds
+ Performous currently builds on Windows(MSVC and MinGW-w64), macOS, and various versions of Ubuntu, Debian, Fedora, as well as an AppImage build.
+ 
