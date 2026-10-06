@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FORK_DIR="${1:?Usage: mirror <fork-dir>}"
+[ "$#" -eq 1 ] || { echo "Usage: mirror <fork-dir>" >&2; exit 1; }
+FORK_DIR="$1"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
 

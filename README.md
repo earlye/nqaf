@@ -108,6 +108,11 @@ it from the fork yourself.
    is the pre-squash parent, which isn't on the default branch. Prompts
    found nowhere are skipped with a warning; `re-apply` treats them as new.
 
+   **`scripts/export-all-patches [<fork-dir> ...]`** runs `export-patches`
+   for every tracked fork (each top-level directory with a `fork.txt`), in
+   sorted order, or just for the ones you name. It keeps going if one fails,
+   prints which succeeded and which failed, and exits non-zero if any failed.
+
 4. **`scripts/re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]`**
    — for pulling in new upstream commits. A no-op if `upstream/HEAD` is
    already contained in the fork's default branch. Otherwise it creates a
@@ -158,4 +163,5 @@ than required if `gh` isn't available).
 | Setting up a brand-new fork for the first time | `scripts/mirror <dir>` then `scripts/apply <dir> <branch>` |
 | Adding a newly-written prompt to an already-applied branch | `scripts/apply <dir> <branch> prompts/feature-NNN.md` |
 | Existing fork with no `patches/` yet | `scripts/export-patches <dir>` |
+| Existing forks with no `patches/` yet, all at once | `scripts/export-all-patches` |
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |

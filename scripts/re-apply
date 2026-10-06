@@ -22,7 +22,9 @@ while [[ "${1:-}" == --* ]]; do
   esac
 done
 
-FORK_DIR="${1:?Usage: re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]}"
+USAGE="Usage: re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]"
+[ "$#" -ge 1 ] || { echo "$USAGE" >&2; exit 1; }
+FORK_DIR="$1"
 shift
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
@@ -38,7 +40,7 @@ fork="$(cat "$CONFIG_DIR/fork.txt")"
 
 if [ ! -d "$WORK_DIR/.git" ]; then
   echo "Cloning $fork → $WORK_DIR"
-  git clone "$fork" "$WORK_DIR"
+  git clone --quiet --no-tags "$fork" "$WORK_DIR"
 fi
 
 # Ensure upstream remote exists
@@ -49,9 +51,8 @@ else
 fi
 
 echo "Fetching origin and upstream..."
-git -C "$WORK_DIR" fetch origin
-git -C "$WORK_DIR" fetch upstream
-git -C "$WORK_DIR" remote set-head upstream --auto >/dev/null
+git -C "$WORK_DIR" fetch --quiet --no-tags origin
+fetch_upstream_default "$WORK_DIR"
 
 upstream_head="$(git -C "$WORK_DIR" rev-parse upstream/HEAD)"
 default_branch="$(git -C "$WORK_DIR" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"

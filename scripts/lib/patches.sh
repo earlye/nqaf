@@ -57,6 +57,20 @@ base_value() {
   sed -n "s/^$2=//p" "$1" | head -n1
 }
 
+# fetch_upstream_default <work-dir> — fetches only upstream's default branch
+# (no tags, no other branches) and points upstream/HEAD at it.
+fetch_upstream_default() {
+  local branch
+  branch="$(git -C "$1" ls-remote --symref upstream HEAD \
+    | sed -n 's@^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$@\1@p')"
+  if [ -z "$branch" ]; then
+    echo "Couldn't determine upstream's default branch" >&2
+    return 1
+  fi
+  git -C "$1" fetch --quiet --no-tags upstream "+refs/heads/$branch:refs/remotes/upstream/$branch"
+  git -C "$1" symbolic-ref refs/remotes/upstream/HEAD "refs/remotes/upstream/$branch"
+}
+
 # exclude_local_files <work-dir> — keeps the agent settings file and agent
 # decision files out of `git add -A` (via .git/info/exclude).
 exclude_local_files() {
