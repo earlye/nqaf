@@ -1,1 +1,1 @@
-https://github.com/performous/performous
+git@github.com:performous/performous
