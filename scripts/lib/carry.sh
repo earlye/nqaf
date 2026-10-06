@@ -4,7 +4,7 @@
 # Shared steps for carrying a fork's features onto upstream: preparing work/,
 # replaying each feature (stored patch, or the agent), the check gate, the PR
 # body, and the push/PR. Sourced by scripts/re-apply and scripts/rebuild,
-# after lib/patches.sh.
+# after lib/patches.sh and lib/limits.sh.
 #
 # Callers set FORK_DIR, CONFIG_DIR, WORK_DIR, PATCHES_DIR, ENGINE, MODEL,
 # upstream and fork before using these. They communicate through globals:
@@ -85,8 +85,8 @@ EOF
     created=1
   fi
   case "$ENGINE" in
-    oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$text") ;;
-    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$text") ;;
+    oneclaw) (cd "$WORK_DIR" && set -x && run_limited oneclaw run --prompt "$text") ;;
+    claude)  (cd "$WORK_DIR" && set -x && run_limited claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$text") ;;
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
   if [ "$created" -eq 1 ]; then
@@ -258,9 +258,10 @@ $(cat "$prompt")"
 
 # run_check — final check gate: <fork-dir>/check if present, else `make test`
 # if the Makefile has a test target, else unverified. A missing check is not a
-# failure.
+# failure. The check runs under run_limited; hitting the memory cap counts as
+# a failure.
 run_check() {
-  local makefile="" f
+  local makefile="" f check_status="" note
   check_log="$(git -C "$WORK_DIR" rev-parse --absolute-git-dir)/nqaf-check.log"
   for f in GNUmakefile makefile Makefile; do
     [ -f "$WORK_DIR/$f" ] && { makefile="$f"; break; }
@@ -268,23 +269,30 @@ run_check() {
   if [ -f "$CONFIG_DIR/check" ]; then
     check_desc="\`$FORK_DIR/check\`"
     echo "Running check: $(cat "$CONFIG_DIR/check")"
-    if (cd "$WORK_DIR" && bash -c "$(cat "$CONFIG_DIR/check")") >"$check_log" 2>&1; then
-      check_result="pass"
-    else
-      check_result="fail"
-    fi
+    check_status=0
+    (cd "$WORK_DIR" && run_limited bash -c "$(cat "$CONFIG_DIR/check")") >"$check_log" 2>&1 \
+      || check_status=$?
   elif [ -n "$makefile" ] && grep -qE '^test[[:space:]]*:' "$WORK_DIR/$makefile"; then
     check_desc="\`make test\`"
     echo "Running check: make test"
-    if (cd "$WORK_DIR" && make test) >"$check_log" 2>&1; then
-      check_result="pass"
-    else
-      check_result="fail"
-    fi
+    check_status=0
+    (cd "$WORK_DIR" && run_limited make test) >"$check_log" 2>&1 || check_status=$?
   else
     check_desc="none (no \`$FORK_DIR/check\` and no Makefile \`test\` target)"
     check_result="unverified"
     : > "$check_log"
+  fi
+  if [ -n "$check_status" ]; then
+    if [ "$check_status" -eq 0 ]; then
+      check_result="pass"
+    else
+      check_result="fail"
+      if [ "$check_status" -eq "$LIMIT_KILLED_STATUS" ]; then
+        note="Check was killed (SIGKILL) — most likely it hit the NQAF_MEMORY_MAX=$NQAF_MEMORY_MAX memory cap."
+        echo "$note" >> "$check_log"
+        echo "$note" >&2
+      fi
+    fi
   fi
   echo "Check result: $check_result (log: $check_log)"
 }
