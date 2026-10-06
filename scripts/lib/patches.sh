@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Shared helpers: per-feature patch storage, local-file exclusion, and PR
 # attribution.
-# Sourced by scripts/apply, scripts/export-patches and scripts/re-apply.
+# Sourced by scripts/apply, scripts/export-patches, scripts/re-apply and
+# scripts/rebuild.
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then

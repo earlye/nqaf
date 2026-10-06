@@ -42,15 +42,15 @@ Each top-level directory (e.g. `obscura/`, `postgresparser/`,
 
 The scripts live in `scripts/` (shared helpers in `scripts/lib/`) and take a
 fork directory as their first positional argument (e.g. `scripts/apply
-obscura`). `apply` and `re-apply` run a coding agent **locally** (`--engine
+obscura`). `apply`, `re-apply` and `rebuild` run a coding agent **locally** (`--engine
 claude` (default) or `--engine oneclaw`) — there is no cloud-hosted agent
 wired into this workflow, so none of this runs in CI. It's a manual,
 human-triggered maintenance step: run it yourself when you want to set up or
-refresh a fork. `apply`, `export-patches` and `re-apply` write
+refresh a fork. `apply`, `export-patches`, `re-apply` and `rebuild` write
 `<fork-dir>/patches/`; review and commit those changes in this repo
 afterwards.
 
-Both agent-running scripts take `--model <id>`, passed to `claude --model`
+The agent-running scripts take `--model <id>`, passed to `claude --model`
 (default `claude-opus-5-5`); it is not passed to `oneclaw`. PRs they open
 start with an attribution line naming the engine and model, e.g.
 `** This is 🤖 Claude (Opus 5.5): **` (oneclaw PRs say `unspecified
@@ -167,9 +167,32 @@ it from the fork yourself.
    exits non-zero if any project didn't succeed. `--dry-run` prints the
    `re-apply` command for each project without running anything.
 
+5. **`scripts/rebuild [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir>`**
+   — rebuilds the fork from scratch on upstream, with no "up to date" skip:
+   use it when `re-apply` would be a no-op (upstream is already contained in
+   the fork) but the fork may not reflect the prompts, e.g. after adding a
+   prompt or after hand-made commits on the fork. It creates
+   `nqaf-rebuild-YYYY-MM-DD` (same suffix rule) from `upstream/HEAD` and
+   carries every prompt forward exactly as `re-apply` does (stored patch
+   where it applies cleanly, the agent otherwise; one `Apply <prompt>`
+   commit each, patches re-exported). It then compares the result's tree
+   with the fork's default branch:
+   - **Identical**: prints "Fork already matches rebuild", restores
+     `patches/` to how it was before the run, deletes the local branch, and
+     exits 0 without pushing.
+   - **Different**: prints `git diff --stat` against the default branch,
+     runs the check, pushes the branch (a normal push; the default branch
+     is never touched) and opens a PR into the default branch, as
+     `re-apply` does. Same exit codes (3 if only the check failed) and
+     `--no-push` behaviour.
+
+   A fork that still tracks `.claude/settings.json` from older runs never
+   matches, since exported patches leave `.claude/` out; the rebuild PR
+   removes it.
+
 `mirror` doesn't touch `work/` at all; it just creates the fork remote via
 `gh repo fork`, so `gh` installed and authenticated is required for that step
-(unlike the PR creation in `apply` and `re-apply`, which is skipped rather
+(unlike the PR creation in `apply`, `re-apply` and `rebuild`, which is skipped rather
 than required if `gh` isn't available).
 
 ## Quick reference
@@ -182,3 +205,4 @@ than required if `gh` isn't available).
 | Existing forks with no `patches/` yet, all at once | `scripts/export-all-patches` |
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |
 | Pick up upstream changes for every fork | `scripts/re-apply-all` (preview with `--dry-run`) |
+| Fork may not reflect its prompts (new prompt, hand edits), upstream unchanged | `scripts/rebuild <dir>` |

@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Rebuild the fork from scratch on the latest upstream, whether or not
+# upstream has moved. Unlike re-apply, there is no "already up to date" skip,
+# so a newly added prompt is picked up even when the fork already contains
+# upstream. Builds a fresh nqaf-rebuild-<date> branch from upstream/HEAD and
+# carries every prompt forward exactly as re-apply does (stored patch where it
+# applies cleanly, the agent otherwise). If the result's tree is identical to
+# the fork's default branch, it says so, restores patches/ and exits 0 without
+# pushing. Otherwise it prints the diff stat, runs the fork's check, pushes and
+# opens a PR into the default branch. Exits 3 if everything ran but the check
+# failed (the branch is still pushed and the PR opened), and 1 on any other
+# error.
+
+ENGINE="claude"
+MODEL=""
+PUSH=1
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --engine) ENGINE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --no-push) PUSH=0; shift ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+USAGE="Usage: rebuild [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir>"
+[ "$#" -eq 1 ] || { echo "$USAGE" >&2; exit 1; }
+FORK_DIR="${1%/}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+WORK_DIR="$CONFIG_DIR/work"
+PATCHES_DIR="$CONFIG_DIR/patches"
+
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
+# shellcheck source=lib/carry.sh
+source "$ROOT_DIR/scripts/lib/carry.sh"
+
+MODEL="$(resolve_model "$ENGINE" "$MODEL")"
+upstream="$(cat "$CONFIG_DIR/upstream.txt")"
+fork="$(cat "$CONFIG_DIR/fork.txt")"
+
+prepare_work_dir
+
+prompts=("$CONFIG_DIR/prompts/"*.md)
+[ -f "${prompts[0]}" ] || { echo "No prompts in $CONFIG_DIR/prompts" >&2; exit 1; }
+
+reset_work_dir
+
+# Every feature re-exports its patch; if the rebuild turns out to match the
+# fork, nothing changed, so put patches/ back as it was.
+snapshot="$(mktemp -d)"
+trap 'rm -rf "$snapshot"' EXIT
+[ -d "$PATCHES_DIR" ] && cp -a "$PATCHES_DIR" "$snapshot/patches"
+
+branch="$(unique_branch nqaf-rebuild)"
+
+echo "Creating $branch from upstream/HEAD ($(git -C "$WORK_DIR" rev-parse --short "$upstream_head"))"
+git -C "$WORK_DIR" checkout -b "$branch" "$upstream_head"
+
+for prompt in "${prompts[@]}"; do
+  carry_feature "$prompt"
+done
+
+if [ "$(git -C "$WORK_DIR" rev-parse 'HEAD^{tree}')" = "$(git -C "$WORK_DIR" rev-parse 'origin/HEAD^{tree}')" ]; then
+  rm -rf "$PATCHES_DIR"
+  [ -d "$snapshot/patches" ] && cp -a "$snapshot/patches" "$PATCHES_DIR"
+  git -C "$WORK_DIR" checkout -q --detach origin/HEAD
+  git -C "$WORK_DIR" branch -q -D "$branch"
+  echo "Fork already matches rebuild: upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")" \
+    "plus ${#names[@]} feature(s) gives the same tree as origin/$default_branch. Nothing to push."
+  exit 0
+fi
+
+echo "Rebuild differs from origin/$default_branch:"
+git -C "$WORK_DIR" --no-pager diff --stat origin/HEAD HEAD
+
+run_check
+
+pr_body="$(git -C "$WORK_DIR" rev-parse --absolute-git-dir)/nqaf-pr-body.md"
+write_pr_body "$pr_body" "Automated by \`scripts/rebuild\`: rebuilds the fork's features on upstream \`$upstream_head\`; the result differs from \`$default_branch\`."
+print_summary
+
+title="NQAF: rebuild fork on upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")"
+[ "$check_result" = "fail" ] && title="$title (CHECK FAILED)"
+push_and_open_pr "$branch" "$title" "$pr_body"
+
+if [ "$check_result" = "fail" ]; then
+  echo "CHECK FAILED — see $check_log" >&2
+  # Distinct from errors (1): the run completed and the branch/PR exist.
+  exit 3
+fi
+echo "Done."
