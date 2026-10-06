@@ -149,12 +149,22 @@ it from the fork yourself.
    default branch whose body lists each feature's outcome
    (clean/repaired/rebuilt/new), the agent's rationales, and the check
    result. The PR is opened even when the check fails, with a warning at the
-   top of the body and in the title, and the script exits non-zero.
-   `--no-push` skips the push and PR and just writes the PR body to
+   top of the body and in the title, and the script exits 3 (other errors
+   exit 1). `--no-push` skips the push and PR and just writes the PR body to
    `work/.git/nqaf-pr-body.md`.
 
    Run this periodically (whenever you know upstream has new commits you
    want).
+
+   **`scripts/re-apply-all [--engine claude|oneclaw] [--model <id>] [--no-push] [--dry-run] [<fork-dir> ...]`**
+   runs `re-apply` for every tracked fork (each top-level directory with a
+   `fork.txt`), in sorted order, or just for the ones you name, passing
+   `--engine`, `--model` and `--no-push` through. Any other option is
+   rejected. It keeps going if one project fails, and ends with a summary
+   that lists projects that succeeded, those whose check failed (exit 3:
+   branch pushed and PR opened anyway), and those that failed outright. It
+   exits non-zero if any project didn't succeed. `--dry-run` prints the
+   `re-apply` command for each project without running anything.
 
 `mirror` doesn't touch `work/` at all; it just creates the fork remote via
 `gh repo fork`, so `gh` installed and authenticated is required for that step
@@ -170,3 +180,4 @@ than required if `gh` isn't available).
 | Existing fork with no `patches/` yet | `scripts/export-patches <dir>` |
 | Existing forks with no `patches/` yet, all at once | `scripts/export-all-patches` |
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |
+| Pick up upstream changes for every fork | `scripts/re-apply-all` (preview with `--dry-run`) |

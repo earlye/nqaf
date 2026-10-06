@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs scripts/re-apply for every tracked fork (each top-level directory with
+# a fork.txt), or only for the projects named as arguments. Keeps going past
+# failures and exits non-zero if any project failed. A project whose run
+# completed but whose check failed (re-apply exit 3; branch pushed and PR
+# opened) is reported separately from other failures.
+
+USAGE="Usage: re-apply-all [--engine claude|oneclaw] [--model <id>] [--no-push] [--dry-run] [projects...]"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+forward=()
+dry_run=0
+projects=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --engine|--model)
+      [ "$#" -ge 2 ] || { echo "$1 needs a value" >&2; echo "$USAGE" >&2; exit 1; }
+      forward+=("$1" "$2"); shift 2 ;;
+    --no-push) forward+=("$1"); shift ;;
+    --dry-run) dry_run=1; shift ;;
+    -*) echo "Unknown option: $1" >&2; echo "$USAGE" >&2; exit 1 ;;
+    *) projects+=("${1%/}"); shift ;;
+  esac
+done
+
+if [ "${#projects[@]}" -eq 0 ]; then
+  for f in "$ROOT_DIR"/*/fork.txt; do
+    [ -f "$f" ] && projects+=("$(basename "$(dirname "$f")")")
+  done
+fi
+
+if [ "${#projects[@]}" -eq 0 ]; then
+  echo "No projects found (no top-level directory with a fork.txt)" >&2
+  exit 1
+fi
+
+sorted=()
+while IFS= read -r project; do
+  sorted+=("$project")
+done < <(printf '%s\n' "${projects[@]}" | sort -u)
+projects=("${sorted[@]}")
+
+succeeded=()
+check_failed=()
+failed=()
+for project in "${projects[@]}"; do
+  echo "=== $project"
+  cmd=("$ROOT_DIR/scripts/re-apply" "${forward[@]}" "$project")
+  if [ "$dry_run" -eq 1 ]; then
+    printf '%q ' "${cmd[@]}"
+    echo
+    continue
+  fi
+  if [ ! -f "$ROOT_DIR/$project/fork.txt" ]; then
+    echo "$project has no fork.txt; not a tracked fork" >&2
+    failed+=("$project")
+    continue
+  fi
+  status=0
+  "${cmd[@]}" || status=$?
+  case "$status" in
+    0) succeeded+=("$project") ;;
+    3) check_failed+=("$project") ;;
+    *) failed+=("$project") ;;
+  esac
+done
+
+[ "$dry_run" -eq 1 ] && exit 0
+
+echo
+echo "Succeeded (${#succeeded[@]}): ${succeeded[*]:-none}"
+echo "Check failed, PR opened (${#check_failed[@]}): ${check_failed[*]:-none}"
+echo "Failed (${#failed[@]}): ${failed[*]:-none}"
+[ "${#failed[@]}" -eq 0 ] && [ "${#check_failed[@]}" -eq 0 ]
