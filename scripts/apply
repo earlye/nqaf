@@ -23,6 +23,8 @@ PATCHES_DIR="$CONFIG_DIR/patches"
 
 # shellcheck source=lib/patches.sh
 source "$ROOT_DIR/scripts/lib/patches.sh"
+# shellcheck source=lib/limits.sh
+source "$ROOT_DIR/scripts/lib/limits.sh"
 
 MODEL="$(resolve_model "$ENGINE" "$MODEL")"
 fork="$(cat "$CONFIG_DIR/fork.txt")"
@@ -103,8 +105,8 @@ described below has already been fully implemented.
 $(cat "$prompt")"
 
   case "$ENGINE" in
-    oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$wrapped_prompt") ;;
-    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$wrapped_prompt") ;;
+    oneclaw) (cd "$WORK_DIR" && set -x && run_limited oneclaw run --prompt "$wrapped_prompt") ;;
+    claude)  (cd "$WORK_DIR" && set -x && run_limited claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$wrapped_prompt") ;;
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
 

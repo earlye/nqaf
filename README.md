@@ -154,6 +154,18 @@ it from the fork yourself.
    exit 1). `--no-push` skips the push and PR and just writes the PR body to
    `work/.git/nqaf-pr-body.md`.
 
+   The agent and the check each run under resource limits
+   (`scripts/lib/limits.sh`): a transient `systemd-run --user --scope` capped
+   at `NQAF_MEMORY_MAX` (default `20G`) with no swap and at
+   `NQAF_CPU_QUOTA` (default `200%`, two cores), at `nice -n 10` and
+   `ionice -c3`. The whole scope is killed if it hits the memory cap; for
+   the check that counts as a failure (exit 137, noted in the log). Build
+   parallelism is limited with `CARGO_BUILD_JOBS` (default `2`; an existing
+   value is kept) and `-p=2` appended to `GOFLAGS` (unless it already has a
+   `-p`). `apply` and `rebuild` run under the same limits. Without a usable
+   systemd user manager, the script prints a warning and runs with
+   nice/ionice only (no memory or CPU cap).
+
    Run this periodically (whenever you know upstream has new commits you
    want).
 

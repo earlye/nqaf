@@ -34,6 +34,8 @@ PATCHES_DIR="$CONFIG_DIR/patches"
 
 # shellcheck source=lib/patches.sh
 source "$ROOT_DIR/scripts/lib/patches.sh"
+# shellcheck source=lib/limits.sh
+source "$ROOT_DIR/scripts/lib/limits.sh"
 # shellcheck source=lib/carry.sh
 source "$ROOT_DIR/scripts/lib/carry.sh"
 
