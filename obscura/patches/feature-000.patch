@@ -1,4 +1,4 @@
-From bc08298bbf0b1a04905bb56c2aad4ad5b30681b0 Mon Sep 17 00:00:00 2001
+From 948efb11ca33bb8424e6883f85a5835e833cbc79 Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
 Date: Tue, 21 Jul 2026 12:47:30 -0500
 Subject: [PATCH] Apply feature-000.md
@@ -43,10 +43,10 @@ index 0000000..bf7208f
 +
 +Do not make any other changes.
 diff --git a/README.md b/README.md
-index b69e1a6..ac1dda9 100644
+index 6ccf4b2..1134cb4 100644
 --- a/README.md
 +++ b/README.md
-@@ -20,6 +20,10 @@
+@@ -25,6 +25,10 @@
  
  Obscura is a headless browser engine written in Rust, built for web scraping and AI agent automation. It runs real JavaScript via V8, supports the Chrome DevTools Protocol, and acts as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
  
@@ -56,4 +56,4 @@ index b69e1a6..ac1dda9 100644
 +
  ### Why Obscura over headless Chrome?
  
- Designed for automation at scale, not desktop browsing.
+ | Metric       | Obscura      | Headless Chrome |

@@ -1,6 +1,6 @@
-From 8c49798ed11a204b06c99b384375eb6bccc8b47b Mon Sep 17 00:00:00 2001
+From 9f46ba2127a445be896ec96bf955c4a01e5c804d Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Fri, 7 Aug 2026 15:55:42 -0500
+Date: Tue, 6 Oct 2026 18:14:37 +0000
 Subject: [PATCH] Apply feature-011.md
 
 ---
@@ -8,11 +8,11 @@ Subject: [PATCH] Apply feature-011.md
  README.md                                | 28 ++++++++++++
  crates/obscura-browser/src/lib.rs        |  3 ++
  crates/obscura-js/src/lib.rs             |  1 +
- crates/obscura-js/src/ops.rs             |  7 +++
+ crates/obscura-js/src/ops.rs             | 35 ++++++++++++---
  crates/obscura-js/src/telemetry.rs       | 54 ++++++++++++++++++++++++
  crates/obscura/examples/dom_telemetry.rs | 38 +++++++++++++++++
  crates/obscura/src/lib.rs                |  5 +++
- 8 files changed, 189 insertions(+)
+ 8 files changed, 210 insertions(+), 7 deletions(-)
  create mode 100644 .nqaf/prompts/feature-011.md
  create mode 100644 crates/obscura-js/src/telemetry.rs
  create mode 100644 crates/obscura/examples/dom_telemetry.rs
@@ -77,10 +77,10 @@ index 0000000..39fc67f
 +called "Fork Features", and a subsection underneath that describing
 +this feature and how to use it.
 diff --git a/README.md b/README.md
-index ac1dda9..2cb72cf 100644
+index 1134cb4..c659e2e 100644
 --- a/README.md
 +++ b/README.md
-@@ -24,6 +24,34 @@ Obscura is a headless browser engine written in Rust, built for web scraping and
+@@ -29,6 +29,34 @@ Obscura is a headless browser engine written in Rust, built for web scraping and
  
  This repository is a fork of [h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura). It carries a set of security and correctness fixes applied on top of upstream, tracked as prompts rather than as a diverging code history. Anyone re-mirroring this fork from a newer upstream release should look at the fork's NQAF prompt history to see which fixes to reapply.
  
@@ -114,12 +114,12 @@ index ac1dda9..2cb72cf 100644
 +
  ### Why Obscura over headless Chrome?
  
- Designed for automation at scale, not desktop browsing.
+ | Metric       | Obscura      | Headless Chrome |
 diff --git a/crates/obscura-browser/src/lib.rs b/crates/obscura-browser/src/lib.rs
-index c715344..b0bd644 100644
+index f504bff..e5aec07 100644
 --- a/crates/obscura-browser/src/lib.rs
 +++ b/crates/obscura-browser/src/lib.rs
-@@ -10,3 +10,6 @@ pub use obscura_js::HTML_TO_MARKDOWN_JS;
+@@ -21,3 +21,6 @@ pub use pdf::{RasterPdfError, RasterPdfOptions, RasterPdfPageRange};
  // Re-exported so the embeddable `obscura` crate (which depends on obscura-browser,
  // not obscura-js) can surface the interception channel types.
  pub use obscura_js::ops::{InterceptResolution, InterceptedRequest};
@@ -127,30 +127,30 @@ index c715344..b0bd644 100644
 +// (feature-011) lives in obscura-js next to the ops that emit it.
 +pub use obscura_js::telemetry::{subscribe_dom_changes, TelemetryDomEvent};
 diff --git a/crates/obscura-js/src/lib.rs b/crates/obscura-js/src/lib.rs
-index 5217f63..4ba121a 100644
+index 061b89c..e6e1a2d 100644
 --- a/crates/obscura-js/src/lib.rs
 +++ b/crates/obscura-js/src/lib.rs
-@@ -5,6 +5,7 @@ pub mod cdp_watchdog;
+@@ -5,6 +5,7 @@ pub mod markdown;
  pub mod module_loader;
- pub mod runtime;
  pub mod ops;
+ pub mod runtime;
 +pub mod telemetry;
  pub mod v8_flags;
- pub mod v8_lock;
- pub mod markdown;
+ mod write_stream;
+ 
 diff --git a/crates/obscura-js/src/ops.rs b/crates/obscura-js/src/ops.rs
-index b942467..8a615ad 100644
+index 1cbae36..5815717 100644
 --- a/crates/obscura-js/src/ops.rs
 +++ b/crates/obscura-js/src/ops.rs
-@@ -8,6 +8,7 @@ use deno_core::OpState;
- use deno_core::Extension;
- use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+@@ -12,6 +12,7 @@ use deno_core::op2;
+ use deno_core::v8;
+ use obscura_dom::tree::{AttachShadowError, ShadowRootMode};
  use obscura_dom::{DomTree, NodeData, NodeId};
 +use crate::telemetry::{emit_dom_event, TelemetryDomEvent};
- use obscura_net::{CallbackRegistry, CookieJar, ObscuraHttpClient, RequestInfo, ResourceType, Response};
  #[cfg(feature = "stealth")]
  use obscura_net::StealthHttpClient;
-@@ -319,6 +320,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
+ use obscura_net::{
+@@ -2477,6 +2478,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                  } else {
                      dom.with_node_mut(node_id, |n| n.set_attribute(name, value.to_string()));
                  }
@@ -158,33 +158,80 @@ index b942467..8a615ad 100644
              }
              "true".into()
          }
-@@ -337,17 +339,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
-             let parent = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
-             let child = match arg2.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
-             dom.append_child(NodeId::new(parent), NodeId::new(child));
-+            emit_dom_event(TelemetryDomEvent::NodeInserted { node_id: child, parent_id: parent });
-             "true".into()
+@@ -2503,7 +2505,14 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+             let parent = NodeId::new(parent);
+             let child = NodeId::new(child);
+             dom.append_child(parent, child);
+-            (dom.get_node(child).and_then(|node| node.parent) == Some(parent)).to_string()
++            let inserted = dom.get_node(child).and_then(|node| node.parent) == Some(parent);
++            if inserted {
++                emit_dom_event(TelemetryDomEvent::NodeInserted {
++                    node_id: child.index() as u32,
++                    parent_id: parent.index() as u32,
++                });
++            }
++            inserted.to_string()
          }
          "remove_child" => {
-             let child = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
-             dom.remove_child(NodeId::new(child));
-+            emit_dom_event(TelemetryDomEvent::NodeRemoved { node_id: child });
-             "true".into()
+             let child = match arg1.parse::<u32>() {
+@@ -2515,11 +2524,14 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+                 .get_node(child)
+                 .is_some_and(|node| node.parent.is_some());
+             dom.remove_child(child);
+-            (had_parent
++            let removed = had_parent
+                 && dom
+                     .get_node(child)
+-                    .is_some_and(|node| node.parent.is_none()))
+-            .to_string()
++                    .is_some_and(|node| node.parent.is_none());
++            if removed {
++                emit_dom_event(TelemetryDomEvent::NodeRemoved { node_id: child.index() as u32 });
++            }
++            removed.to_string()
          }
          "insert_before" => {
-             let new_node = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
-             let ref_node = match arg2.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
-+            let parent_id = dom.with_node(NodeId::new(ref_node), |n| n.parent).flatten().map(|p| p.index() as u32).unwrap_or(0);
-             dom.insert_before(NodeId::new(ref_node), NodeId::new(new_node));
-+            emit_dom_event(TelemetryDomEvent::NodeInserted { node_id: new_node, parent_id });
-             "true".into()
+             let new_node = match arg1.parse::<u32>() {
+@@ -2534,9 +2546,15 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+             let new_node = NodeId::new(new_node);
+             let expected_parent = dom.get_node(ref_node).and_then(|node| node.parent);
+             dom.insert_before(ref_node, new_node);
+-            (expected_parent.is_some()
+-                && dom.get_node(new_node).and_then(|node| node.parent) == expected_parent)
+-                .to_string()
++            let inserted = expected_parent.is_some()
++                && dom.get_node(new_node).and_then(|node| node.parent) == expected_parent;
++            if let (true, Some(parent)) = (inserted, expected_parent) {
++                emit_dom_event(TelemetryDomEvent::NodeInserted {
++                    node_id: new_node.index() as u32,
++                    parent_id: parent.index() as u32,
++                });
++            }
++            inserted.to_string()
          }
          "remove_attribute" => {
-@@ -357,6 +363,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
-                     attrs.retain(|a| a.name.local.as_ref() != arg2.as_str());
-                 }
-             });
+             let nid = arg1.parse::<u32>().unwrap_or(0);
+@@ -2558,6 +2576,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+             if arg2 == "id" {
+                 dom.update_id_index(node_id, old_id.as_deref(), None);
+             }
 +            emit_dom_event(TelemetryDomEvent::AttributeChanged { node_id: nid, name: arg2.clone() });
+             "true".into()
+         }
+         // Namespace-aware attribute ops. arg2 packs the pieces with a NUL:
+@@ -2598,6 +2617,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+                         n.set_attribute_ns(ns, qualified, value.to_string())
+                     });
+                 }
++                emit_dom_event(TelemetryDomEvent::AttributeChanged { node_id: nid, name: qualified.to_string() });
+             }
+             "true".into()
+         }
+@@ -2614,6 +2634,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
+             } else {
+                 dom.with_node_mut(node_id, |n| n.remove_attribute_ns(ns, local));
+             }
++            emit_dom_event(TelemetryDomEvent::AttributeChanged { node_id: nid, name: local.to_string() });
              "true".into()
          }
          "set_inner_html" => {

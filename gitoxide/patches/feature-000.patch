@@ -1,4 +1,4 @@
-From 0a7b87ce5afba3c68df8098052965cf729a13b4d Mon Sep 17 00:00:00 2001
+From 8feccbc2840bee401fa6a73f3a3ffe4f02ec9fbb Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
 Date: Sun, 9 Aug 2026 16:04:19 -0500
 Subject: [PATCH] Apply feature-000.md
@@ -44,7 +44,7 @@ index 000000000..3b1d8dc49
 +
 +Do not make any other changes.
 diff --git a/README.md b/README.md
-index 0e3b5d4ec..8dadbe541 100644
+index 5677085b1..feed1b184 100644
 --- a/README.md
 +++ b/README.md
 @@ -5,6 +5,13 @@

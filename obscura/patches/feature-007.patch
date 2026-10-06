@@ -1,43 +1,14 @@
-From 381454825e91ba081964276722752804ada8436b Mon Sep 17 00:00:00 2001
+From 40152bc5593c7a924ba7f789cc4ee207892873fe Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
-Date: Tue, 21 Jul 2026 13:43:16 -0500
+Date: Tue, 6 Oct 2026 17:57:57 +0000
 Subject: [PATCH] Apply feature-007.md
 
 ---
- .github/workflows/cargo-deny.yml  | 12 +++++++
- .nqaf/prompts/feature-007.md      | 60 +++++++++++++++++++++++++++++++
- Cargo.lock                        |  4 +--
- crates/obscura-browser/Cargo.toml |  1 +
- crates/obscura-cdp/Cargo.toml     |  1 +
- crates/obscura-cli/Cargo.toml     |  1 +
- crates/obscura-dom/Cargo.toml     |  1 +
- crates/obscura-js/Cargo.toml      |  1 +
- crates/obscura-mcp/Cargo.toml     |  1 +
- crates/obscura-net/Cargo.toml     |  1 +
- deny.toml                         | 53 +++++++++++++++++++++++++++
- 11 files changed, 134 insertions(+), 2 deletions(-)
- create mode 100644 .github/workflows/cargo-deny.yml
+ .nqaf/prompts/feature-007.md | 60 ++++++++++++++++++++++++++++++++++++
+ deny.toml                    |  1 +
+ 2 files changed, 61 insertions(+)
  create mode 100644 .nqaf/prompts/feature-007.md
- create mode 100644 deny.toml
 
-diff --git a/.github/workflows/cargo-deny.yml b/.github/workflows/cargo-deny.yml
-new file mode 100644
-index 0000000..f18e75c
---- /dev/null
-+++ b/.github/workflows/cargo-deny.yml
-@@ -0,0 +1,12 @@
-+name: cargo-deny
-+
-+on:
-+  push:
-+  pull_request:
-+
-+jobs:
-+  cargo-deny:
-+    runs-on: ubuntu-latest
-+    steps:
-+      - uses: actions/checkout@v4
-+      - uses: EmbarkStudios/cargo-deny-action@v2
 diff --git a/.nqaf/prompts/feature-007.md b/.nqaf/prompts/feature-007.md
 new file mode 100644
 index 0000000..231af65
@@ -104,162 +75,15 @@ index 0000000..231af65
 +document's wording — also has real, ongoing value: it catches known-vulnerable
 +or yanked dependencies automatically on every future change, not just at
 +review time.
-diff --git a/Cargo.lock b/Cargo.lock
-index 7a23ba9..c241fdc 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -125,9 +125,9 @@ dependencies = [
- 
- [[package]]
- name = "anyhow"
--version = "1.0.102"
-+version = "1.0.104"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
-+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
- 
- [[package]]
- name = "async-compression"
-diff --git a/crates/obscura-browser/Cargo.toml b/crates/obscura-browser/Cargo.toml
-index 1ed64cd..cd1aa96 100644
---- a/crates/obscura-browser/Cargo.toml
-+++ b/crates/obscura-browser/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-browser"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [features]
- default = []
-diff --git a/crates/obscura-cdp/Cargo.toml b/crates/obscura-cdp/Cargo.toml
-index 973dc00..1d4261d 100644
---- a/crates/obscura-cdp/Cargo.toml
-+++ b/crates/obscura-cdp/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-cdp"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [dependencies]
- obscura-dom = { workspace = true }
-diff --git a/crates/obscura-cli/Cargo.toml b/crates/obscura-cli/Cargo.toml
-index 2d383a6..94c0b1a 100644
---- a/crates/obscura-cli/Cargo.toml
-+++ b/crates/obscura-cli/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-cli"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [[bin]]
- name = "obscura"
-diff --git a/crates/obscura-dom/Cargo.toml b/crates/obscura-dom/Cargo.toml
-index 58260db..9ac4cf6 100644
---- a/crates/obscura-dom/Cargo.toml
-+++ b/crates/obscura-dom/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-dom"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [dependencies]
- html5ever = { workspace = true }
-diff --git a/crates/obscura-js/Cargo.toml b/crates/obscura-js/Cargo.toml
-index 0dfa4ff..97a0b1f 100644
---- a/crates/obscura-js/Cargo.toml
-+++ b/crates/obscura-js/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-js"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [features]
- default = []
-diff --git a/crates/obscura-mcp/Cargo.toml b/crates/obscura-mcp/Cargo.toml
-index 2cc7f97..3545ba3 100644
---- a/crates/obscura-mcp/Cargo.toml
-+++ b/crates/obscura-mcp/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-mcp"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [features]
- default = []
-diff --git a/crates/obscura-net/Cargo.toml b/crates/obscura-net/Cargo.toml
-index 44001dd..43e4bb8 100644
---- a/crates/obscura-net/Cargo.toml
-+++ b/crates/obscura-net/Cargo.toml
-@@ -2,6 +2,7 @@
- name = "obscura-net"
- version.workspace = true
- edition.workspace = true
-+license.workspace = true
- 
- [features]
- default = []
 diff --git a/deny.toml b/deny.toml
-new file mode 100644
-index 0000000..542b13d
---- /dev/null
+index dcf508d..8747378 100644
+--- a/deny.toml
 +++ b/deny.toml
-@@ -0,0 +1,53 @@
-+# Config for `cargo deny check`, referenced by SECURITY.md.
-+# https://embarkstudios.github.io/cargo-deny/
-+
-+[graph]
-+all-features = true
-+
-+[advisories]
-+db-urls = ["https://github.com/rustsec/advisory-db"]
+@@ -2,6 +2,7 @@
+ # Run: cargo deny --all-features check --config deny.toml advisories bans licenses sources
+ 
+ [advisories]
 +yanked = "deny"
-+# Narrow, dated exemptions for "unmaintained" advisories with no available fix,
-+# all pulled in transitively (deno_core/selectors/v8), not by our own direct
-+# deps. Re-check on the next `cargo update` in case an upgrade path appears.
-+ignore = [
-+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 is unmaintained with no successor upgrade; pulled in transitively via deno_core. No safe upgrade available as of 2026-07-21." },
-+    { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 is unmaintained; pulled in transitively via selectors (obscura-dom). No safe upgrade available as of 2026-07-21." },
-+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is unmaintained; pulled in transitively via v8/serde_v8. No safe upgrade available as of 2026-07-21." },
-+]
-+
-+[licenses]
-+confidence-threshold = 0.8
-+# Every license currently in use across the dependency tree (`cargo deny
-+# list`), minus LGPL-2.1-or-later: that license only appears via r-efi's
-+# "MIT OR Apache-2.0 OR LGPL-2.1-or-later" triple license, and r-efi is only
-+# pulled in as a target dependency of getrandom on UEFI, a target this
-+# project doesn't build for. Leaving it off keeps the allow list
-+# permissive-only; r-efi still passes under its MIT/Apache-2.0 option.
-+allow = [
-+    "0BSD",
-+    "Apache-2.0",
-+    "Apache-2.0 WITH LLVM-exception",
-+    "BSD-2-Clause",
-+    "BSD-3-Clause",
-+    "BSL-1.0",
-+    "CDLA-Permissive-2.0",
-+    "ISC",
-+    "MIT",
-+    "MPL-2.0",
-+    "Unicode-3.0",
-+    "Unlicense",
-+    "Zlib",
-+]
-+
-+[bans]
-+# A hard deny here breaks on the next routine dependency bump for reasons
-+# unrelated to security (e.g. two crates pinning different semver-incompatible
-+# versions of a common dep); keep it a warning rather than a CI failure.
-+multiple-versions = "warn"
-+
-+[sources]
-+unknown-registry = "deny"
-+unknown-git = "deny"
-+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-+allow-git = []
+ # Real vulnerabilities fail the build. The advisories below are *unmaintained*
+ # notices for transitive crates with no available fix; they are explicitly
+ # accepted until the upstream parents drop them.

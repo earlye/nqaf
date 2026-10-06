@@ -1,4 +1,4 @@
-From 9d2369ec2526725e814b3be818b665d5bbbafe09 Mon Sep 17 00:00:00 2001
+From 5701ef395d3bd6eb83b51dac965612388ea3d17e Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
 Date: Tue, 29 Sep 2026 23:07:26 +0000
 Subject: [PATCH] Apply feature-000.md
@@ -45,10 +45,10 @@ index 000000000..7c9c49596
 +
 +Do not make any other changes.
 diff --git a/README.md b/README.md
-index 822d3209c..63d0636ed 100644
+index a889bf09a..41b7571b3 100644
 --- a/README.md
 +++ b/README.md
-@@ -29,6 +29,12 @@
+@@ -30,6 +30,12 @@
  
  ---
  
@@ -60,4 +60,4 @@ index 822d3209c..63d0636ed 100644
 +
  ## About
  
- Turso Database is an in-process SQL database written in Rust, compatible with SQLite. It runs in production today at multiple organizations — see the [FAQ](#faq) for where the project stands on its way to 1.0.
+ Turso is an in-process SQL database written in Rust, compatible with SQLite. It runs in production today at multiple organizations.

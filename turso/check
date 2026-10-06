@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run by scripts/lib/carry.sh as `bash -c "$(cat turso/check)"` from turso/work,
+# in place of `make test`. ../check-env.sh fills host gaps (Python >=3.10 for
+# pyo3, a glibc-2.34-compatible sqlite3, yarn via corepack).
+set -e
+. ../check-env.sh
+# make test runs no turso_core unit tests; run the ones feature-001 touches
+# (orphan WAL policy, its multiprocess sibling, IO-trait impls in vacuum,
+# statement lifecycle and group-commit tests) first, since they fail fastest.
+cargo test -p turso_core --lib -- orphan_wal_tests multiprocess_tests \
+  vacuum statement_lifecycle_tests group_commit_sync_mode_tests
+exec make test TEST_RUNNER="sh $PWD/../sqltest-serial.sh"
