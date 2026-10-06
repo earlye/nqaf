@@ -1,0 +1,576 @@
+From 8b293be22572572090914bafccb48d05d8804d6b Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 6 Oct 2026 04:05:04 +0000
+Subject: [PATCH] Apply feature-001.md
+
+---
+ .github/workflows/earlye-mac-dmg.yml | 430 +++++++++++++++++++++++++++
+ .nqaf/prompts/feature-001.md         | 122 ++++++++
+ 2 files changed, 552 insertions(+)
+ create mode 100644 .github/workflows/earlye-mac-dmg.yml
+ create mode 100644 .nqaf/prompts/feature-001.md
+
+diff --git a/.github/workflows/earlye-mac-dmg.yml b/.github/workflows/earlye-mac-dmg.yml
+new file mode 100644
+index 00000000..501f45cb
+--- /dev/null
++++ b/.github/workflows/earlye-mac-dmg.yml
+@@ -0,0 +1,430 @@
++name: Earlye macOS DMG
++
++# FORK-LOCAL FILE. Not present upstream; upstream never touches it, so it survives
++# every `git rebase upstream/master` untouched.
++#
++# Why this is standalone instead of `uses: ./.github/workflows/macports.yml`:
++# macports.yml's upload steps are gated on `github.event_name == 'pull_request'`
++# or `github.ref == 'refs/heads/master'`. Those read the CALLER's triggering event,
++# so a push-triggered caller runs the whole 1-3h build and uploads nothing, and no
++# workflow_call input can change that. macports.yml also declares no outputs, so the
++# DMG cannot be handed back. Hence: own copy of the job.
++#
++# Keep the "Amend macports configuration" / "Install Dependencies" / cache-key steps
++# byte-identical to upstream's macports.yml so the dependency cache is SHARED with
++# any build_and_release.yml run in this repo. Re-sync them when upstream changes.
++
++on:
++  push:
++    branches-ignore:
++      - master          # master pushes are for syncing upstream, not for building
++  workflow_dispatch:
++    inputs:
++      arch:
++        description: 'Which macOS builds to produce'
++        type: choice
++        default: arm64
++        options:
++          - arm64
++          - intel
++          - both
++      deployment_target:
++        description: 'Override macOS deployment target (blank = 15.0 arm64 / 12.0 intel). The default arm64/15.0 build is correct for the M4 on macOS 15.7; only lower this to produce a DMG for an older Mac, and note it changes the cache key and forces a cold rebuild.'
++        type: string
++        required: false
++        default: ''
++
++permissions:
++  contents: read
++  actions: write
++
++concurrency:
++  group: earlye-mac-dmg-${{ github.ref }}
++  # Cancel superseded feature-branch runs, but never kill a master run: master runs
++  # are what seed the default-branch-scoped dependency cache.
++  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
++
++jobs:
++  choose:
++    name: Choose builds
++    runs-on: ubuntu-latest
++    outputs:
++      include: ${{ steps.pick.outputs.include }}
++    steps:
++      - id: pick
++        env:
++          ARCH: ${{ inputs.arch || 'arm64' }}
++          TARGET_OVERRIDE: ${{ inputs.deployment_target }}
++        run: |
++          arm='{"os":"macos-26","target":"15.0"}'
++          intel='{"os":"macos-15-intel","target":"12.0"}'
++          if [[ -n "${TARGET_OVERRIDE}" ]]; then
++            arm="{\"os\":\"macos-26\",\"target\":\"${TARGET_OVERRIDE}\"}"
++            intel="{\"os\":\"macos-15-intel\",\"target\":\"${TARGET_OVERRIDE}\"}"
++          fi
++          case "${ARCH}" in
++            intel) include="[${intel}]" ;;
++            both)  include="[${arm},${intel}]" ;;
++            *)     include="[${arm}]" ;;
++          esac
++          echo "include=${include}" | tee -a "$GITHUB_OUTPUT"
++
++  dmg:
++    name: DMG (${{ matrix.os }} / target ${{ matrix.target }})
++    needs: choose
++    strategy:
++      fail-fast: false
++      matrix:
++        include: ${{ fromJSON(needs.choose.outputs.include) }}
++    runs-on: '${{ matrix.os }}'
++    timeout-minutes: 350        # hard ceiling is 360; fail visibly rather than be killed
++    env:
++      BOOST_VERSION: '1.87'
++      MACOS_DEPS: >-
++        boost boost.version=1.87
++        cairo
++        cmake
++        cpprestsdk boost.version=1.87
++        dylibbundler
++        ffmpeg7
++        fftw-3-single
++        libfmt11
++        fontconfig
++        freetype
++        glm
++        gtest
++        help2man
++        icu
++        libepoxy
++        librsvg
++        libsdl2
++        libxmlxx5
++        nlohmann-json
++        opencv4
++        openssl
++        pango
++        portaudio
++        portmidi
++    steps:
++      - name: Checkout Git
++        uses: actions/checkout@v6
++        with:
++          path: performous
++          fetch-depth: 0        # needed for `git describe --tags`
++
++      - name: Compute version and artifact name
++        id: ver
++        run: |
++          cd "${{ github.workspace }}/performous"
++          RAW=$(git describe --tags --abbrev=0 2>/dev/null || true)
++          # macos-bundler.py's set_version() does a re.match for X.Y.Z and
++          # dereferences the match object unconditionally, so a two-component tag
++          # like "1.0" or a non-numeric tag crashes it. Normalise defensively.
++          NUM=$(printf '%s' "$RAW" | grep -Eo '^[0-9]+(\.[0-9]+){0,2}' || true)
++          [ -n "$NUM" ] || NUM="1.0.0"
++          while [ "$(printf '%s' "$NUM" | tr -cd '.' | wc -c | tr -d ' ')" -lt 2 ]; do NUM="${NUM}.0"; done
++          SHORT=$(git rev-parse --short=7 HEAD)
++          SAFE_REF=$(printf '%s' "${{ github.ref_name }}" | tr '/\\:<>|*?"' '-')
++          echo "package_version=${NUM}+git-${SHORT}" | tee -a "$GITHUB_OUTPUT"
++          echo "safe_ref=${SAFE_REF}"                | tee -a "$GITHUB_OUTPUT"
++          echo "short_sha=${SHORT}"                  | tee -a "$GITHUB_OUTPUT"
++
++      - name: Install Macports
++        uses: Lord-Kamina/setup-macports@78191c8e21d240aadf27da56614fd840b4d6fbf1  # main @ 2025-12-07
++        with:
++          parameters: ./performous/.github/macports-settings.yml
++          enable-cache: 'false'
++
++      - name: Amend macports configuration
++        run: |
++          sudo port sync
++          echo macosx_deployment_target ${{ matrix.target }} | tee -a /opt/local/etc/macports/macports.conf
++          echo cxx_stdlib libc++ | tee -a /opt/local/etc/macports/macports.conf
++          echo buildmakejobs 0 | tee -a /opt/local/etc/macports/macports.conf
++          echo startupitem_type none | tee -a /opt/local/etc/macports/macports.conf
++          echo build_arch $(uname -m) | tee -a /opt/local/etc/macports/macports.conf
++          echo build_arch $(uname -m) | tee -a /opt/local/etc/macports/macports.conf
++          echo boost.version ${BOOST_VERSION} | tee -a /opt/local/etc/macports/macports.conf
++
++          sudo mkdir -p /opt/custom_portfiles/www/
++          sudo portindex \
++          /opt/local/var/macports/sources/rsync.macports.org/macports/release/tarballs/ports/
++          sudo cp -Rvf $(dirname $(port file cpprestsdk)) /opt/custom_portfiles/www/
++          sudo mkdir -p /opt/custom_portfiles/www/cpprestsdk/files
++
++          sudo cp -vf ./performous/.github/support-boost-1.87.patch /opt/custom_portfiles/www/cpprestsdk/files/
++
++          sudo mkdir -p /opt/custom_portfiles/graphics/
++          sudo cp -Rv $(dirname $(port file librsvg)) /opt/custom_portfiles/graphics/
++
++          sudo cat <<EOF | sudo tee -a /opt/custom_portfiles/graphics/librsvg/Portfile
++          configure.ldflags-append -Wl,-headerpad_max_install_names
++          EOF
++
++          sudo cat <<EOF | sudo tee -a /opt/custom_portfiles/www/cpprestsdk/Portfile
++            patchfiles-append support-boost-1.87.patch
++            configure.args-append -DCPPREST_EXCLUDE_WEBSOCKETS=ON
++            depends_build-delete port:websocketpp
++          EOF
++
++          sudo cat <<EOF | sudo tee /opt/local/etc/macports/sources.conf
++          file:///opt/custom_portfiles [nosync]
++          rsync://rsync.macports.org/macports/release/tarballs/ports.tar [default]
++          EOF
++
++          sudo portindex /opt/custom_portfiles
++
++      - name: Generate versions file for cache-key.
++        run: |
++          echo macOS $(sw_vers -productVersion | cut -f1 -d.) | tee "${{ github.workspace }}/cache-key.txt"
++          echo CPU Type: $(uname -m) | tee -a "${{ github.workspace }}/cache-key.txt"
++          echo Deployment target: ${{ matrix.target }} | tee -a "${{ github.workspace }}/cache-key.txt"
++
++          port info --fullname ${MACOS_DEPS} boost.version=${BOOST_VERSION} | \
++          grep -v -e'^--$' | cut -w -f2-3 | \
++          sed -E 's/@([[:digit:]]+)\.([[:digit:]]+)\.([[:digit:]]+){1}((\+|-)[a-zA-Z0-9_]+)*/@\1.\2/g' | \
++          tee -a "${{ github.workspace }}/cache-key.txt"
++
++          echo contents of cache-key-file:
++          cat "${{ github.workspace }}/cache-key.txt"
++
++      - name: Compute cache-key
++        id: cache-key
++        run: |
++          # Identical formula to macports.yml so this shares cache entries with it.
++          echo "computed_cache_key=macports-${{matrix.os}}-${{ hashFiles('cache-key.txt') }}" >> $GITHUB_OUTPUT
++
++      - name: Make /opt/local writable before restore
++        run: |
++          # `sudo port sync` in "Amend macports configuration" repopulates
++          # /opt/local/var/macports/sources as root. actions/cache extracts as the
++          # unprivileged runner user, which then cannot overwrite those files: gtar
++          # reports "Cannot open: File exists" on each one and exits non-zero, so
++          # the action discards an otherwise good 880MB restore and reports
++          # "Cache not found for input keys".
++          #
++          # This is the same ownership problem as the chown before the save, at the
++          # other end of the job. The save needs the ARCHIVE to be runner-owned; the
++          # restore needs the EXTRACTION TARGET to be runner-owned.
++          sudo chown -R "$(id -u -n):$(id -g -n)" /opt/local
++          if [ -d /Applications/MacPorts ]; then
++            sudo chown -R "$(id -u -n):$(id -g -n)" /Applications/MacPorts
++          fi
++
++      - name: Try to restore cache
++        id: restore_cache
++        # Stock actions/cache, not Lord-Kamina/always-upload-cache (which upstream's
++        # macports.yml uses). That fork restores correctly -- the log says "Cache hit
++        # for: <key>" and the 875MB is pulled down -- but it does not populate its
++        # documented `cache-hit` output, so every consumer below saw a miss, the
++        # expensive branch of Install Dependencies ran anyway, and the save
++        # re-uploaded a duplicate entry on every feature branch.
++        #
++        # The fork exists to provide `refresh-cache`, which we deliberately do not
++        # use, so stock is behaviourally identical here and drops two third-party
++        # actions pinned to moving refs. The cache KEY formula is unchanged, which
++        # is what has to stay byte-identical to upstream, not the action.
++        uses: actions/cache/restore@v4
++        with:
++          path: |
++            /opt/local/
++            /Applications/MacPorts/
++          key: '${{ steps.cache-key.outputs.computed_cache_key }}'
++
++      - name: Unlink Homebrew
++        run: |
++          brew unlink $(brew list --formula)
++          echo cmake: $(which cmake)
++
++      - name: Install Dependencies
++        run: |
++          . "${{ github.workspace}}/performous/.github/try_binary_first.sh"
++          set -x
++          if [[ "${{ steps.restore_cache.outputs.cache-hit }}" == "true" ]]; then
++            echo "Installed but inactive ports: "
++            sudo port -v installed inactive
++            sudo port activate -f installed boost.version=${BOOST_VERSION}
++          else
++            sudo portindex /opt/custom_portfiles
++          fi
++
++          echo buildfromsource ifneeded | tee -a /opt/local/etc/macports/macports.conf
++          echo keeplogs yes | tee -a /opt/local/etc/macports/macports.conf
++          sudo port install -s icu gettext-runtime
++
++          set +x
++          set +e
++          sudo rm -rvf /opt/local/var/macports/build
++
++          try_binary_first autoconf autoconf-archive automake bison cargo cctools clang-18 libgcc gcc15 gcc15-libcxx cmake docbook-xml docbook-xsl-nons flex gi-docgen git gmake gperf gtk-doc itstool meson mm-common nasm ninja p7zip perl5 pkgconfig py313-docutils py313-build py313-cython py313-installer py313-wheel python313 rust texinfo unzip vim websocketpp xmlto yasm boost.version=${BOOST_VERSION}
++
++          set -x
++          sudo port -s install ${MACOS_DEPS} boost.version=${BOOST_VERSION}
++
++          echo "Installed ports: "
++          port installed
++
++          sudo port -v uninstall gcc* clang* llvm* || true
++          sudo port clean --all installed
++          sudo port -N rev-upgrade
++          sudo port -N activate active boost.version=${BOOST_VERSION}
++          sudo port -N uninstall leaves || true
++          sudo port deactivate -f installed
++          sudo port activate -f zstd boost.version=${BOOST_VERSION}
++
++      - name: Get logs from last job
++        if: ${{ !cancelled() }}
++        id: get-logs
++        run: |
++          cd /opt/local/var/macports
++          tar -czf ${{ github.workspace }}/MacPorts-log-${{ matrix.os }}.tar.gz ./logs ./build
++          echo "log_path=${{ github.workspace }}/MacPorts-log-${{ matrix.os }}.tar.gz" >> $GITHUB_OUTPUT
++
++      - name: Prepare /opt/local for caching
++        run: |
++          sudo find /opt/local/var -type d -a -perm 700 -exec chmod 755 {} \;
++
++          # actions/cache runs `tar` as the unprivileged `runner` user, for BOTH
++          # halves, and MacPorts leaves the prefix full of root-owned files because
++          # every port was installed via `sudo port`. That breaks each half
++          # differently:
++          #
++          #   save:    bsdtar exits 1 on the first unreadable file -- dbus's setuid
++          #            `dbus-daemon-launch-helper`, pulled in transitively by glib2.
++          #            This is why upstream's macOS cache has never saved, on either
++          #            arm64 or Intel.
++          #   restore: gtar extracts the tree but cannot utime root-owned
++          #            directories, exits 2, and actions/cache reports the whole
++          #            thing as a miss -- "Cache not found for input keys" -- even
++          #            though it just downloaded and unpacked 875MB.
++          #
++          # chown fixes both, and restores the prefix to the state setup-macports
++          # itself leaves it in (it does the same chown at install time, before
++          # `sudo port` starts creating root-owned files). chmod a+rX is kept as
++          # belt and braces for anything chown misses.
++          sudo chown -R "$(id -u -n):$(id -g -n)" /opt/local
++          sudo chmod -R a+rX /opt/local
++
++          # /Applications/MacPorts is in the cache path list but is not created on
++          # every runner image, so touch it only if it is actually there -- an
++          # unguarded chown/chmod exits 1 and takes the whole job down with it.
++          if [ -d /Applications/MacPorts ]; then
++            sudo chown -R "$(id -u -n):$(id -g -n)" /Applications/MacPorts
++            sudo chmod -R a+rX /Applications/MacPorts
++          fi
++
++          sudo xattr -c -rsv /opt/local
++
++      - name: Cache dependencies
++        # Skipped on a hit: the tree is unchanged, and re-saving from a feature
++        # branch just burns the 10GB repo quota with a duplicate ~875MB entry --
++        # about eleven branches would start evicting each other, master's entry
++        # included.
++        #
++        # Upstream passes refresh-cache:true to the always-upload-cache fork, which
++        # DELETES the matched entry before re-saving. From a feature branch that
++        # would destroy the default-branch entry every other branch depends on.
++        # Stock save has no such behaviour, which is what we want.
++        #
++        # Gated on master as well as on the miss: a cache entry is only useful in
++        # the default-branch scope, since that is the only scope every other branch
++        # can read. A feature-branch save is unreadable by any other branch and just
++        # burns ~880MB of the 10GB repo quota, so if the restore ever regresses
++        # again this cannot quietly fill the quota and evict master's entry.
++        if: ${{ github.ref == 'refs/heads/master' && steps.restore_cache.outputs.cache-hit != 'true' }}
++        uses: actions/cache/save@v4
++        with:
++          path: |
++            /opt/local/
++            /Applications/MacPorts/
++          key: '${{ steps.cache-key.outputs.computed_cache_key }}'
++
++      - name: Build package
++        id: build_package
++        run: |
++          sudo port activate -f installed boost.version=${BOOST_VERSION}
++          cd performous/osx-utils
++          chmod +x ./macos-bundler.py
++          python3 -m venv ./bundler-venv
++          source ./bundler-venv/bin/activate
++          pip3 install -r ./macos-bundler-requirements.txt
++          python3 ./macos-bundler.py --flat-output --verify-bundle \
++            --package-version="${{ steps.ver.outputs.package_version }}" \
++            --target="${{ matrix.target }}" \
++            --enable-webserver=on --enable-midi=on --enable-webcam=on --build-tests=on --prefer-macports
++          PACKAGE_PATH="${{ github.workspace }}/performous/osx-utils/out/Performous-${{ steps.ver.outputs.package_version }}-$(uname -m).dmg"
++          echo "ARTIFACT_PATH=${PACKAGE_PATH}" >> ${GITHUB_ENV}
++          echo "ARTIFACT_NAME=Performous-${{ steps.ver.outputs.safe_ref }}-${{ steps.ver.outputs.short_sha }}-$(uname -m)-macos${{ matrix.target }}" >> ${GITHUB_ENV}
++
++      - name: Run unittests directly called.
++        run: |
++          cd "${{ github.workspace }}/performous/build/testing"
++          ./performous_test --gtest_filter=UnitTest*
++
++      - name: Run unittests by ctest.
++        run: |
++          cd "${{ github.workspace }}/performous/build"
++          make test
++
++      - name: Upload DMG
++        id: upload
++        uses: actions/upload-artifact@v7
++        with:
++          name: ${{ env.ARTIFACT_NAME }}
++          path: ${{ env.ARTIFACT_PATH }}
++          if-no-files-found: error
++          retention-days: 14
++
++      - name: Summary
++        if: ${{ always() && env.ARTIFACT_NAME != '' }}
++        run: |
++          {
++            echo "### macOS DMG"
++            echo ""
++            echo "| | |"
++            echo "|---|---|"
++            echo "| branch | \`${{ github.ref_name }}\` |"
++            echo "| commit | \`${{ steps.ver.outputs.short_sha }}\` |"
++            echo "| runner / target | \`${{ matrix.os }}\` / \`${{ matrix.target }}\` |"
++            echo "| artifact | \`${{ env.ARTIFACT_NAME }}\` |"
++            echo "| cache | \`${{ steps.restore_cache.outputs.cache-hit == 'true' && 'hit' || 'MISS (cold build)' }}\` |"
++            echo ""
++            echo "After downloading and unzipping, the .app is unsigned; clear quarantine with:"
++            echo '```'
++            echo 'xattr -dr com.apple.quarantine /Applications/Performous.app'
++            echo '```'
++          } >> "$GITHUB_STEP_SUMMARY"
++
++      - name: Upload logs
++        if: ${{ steps.get-logs.outputs.log_path != null && !cancelled() }}
++        uses: actions/upload-artifact@v7
++        with:
++          name: "MacPorts-log-${{ matrix.os }}-${{ steps.ver.outputs.short_sha }}.tar.gz"
++          path: "${{ steps.get-logs.outputs.log_path }}"
++
++      # Last step in the job, so a cache regression fails the run loudly without
++      # costing the DMG -- which is already uploaded by the time this runs.
++      - name: Verify cache was saved
++        # Same gate as the save step above, so this verifies what that step did.
++        if: ${{ github.ref == 'refs/heads/master' && steps.restore_cache.outputs.cache-hit != 'true' }}
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          CACHE_KEY: ${{ steps.cache-key.outputs.computed_cache_key }}
++        run: |
++          # `Lord-Kamina/always-upload-cache/save` (like actions/cache) downgrades
++          # every save failure to a ::warning:: and still reports step success, so a
++          # broken cache is invisible until you notice builds are permanently cold.
++          #
++          # curl + python3 rather than `gh`: the "Unlink Homebrew" step earlier in
++          # this job takes gh off PATH, so `gh api` here exits 127.
++          resp=$(curl -fsSL \
++            -H "Authorization: Bearer ${GH_TOKEN}" \
++            -H "Accept: application/vnd.github+json" \
++            "https://api.github.com/repos/${{ github.repository }}/actions/caches?key=${CACHE_KEY}")
++          printf '%s' "${resp}" | python3 -c "import json,sys; [print('  %s bytes  ref=%s  %s' % (c['size_in_bytes'], c['ref'], c['key'])) for c in json.load(sys.stdin)['actions_caches']]"
++          n=$(printf '%s' "${resp}" | python3 -c "import json,sys; print(json.load(sys.stdin)['total_count'])")
++          if [ "${n}" -eq 0 ]; then
++            echo "::error::Cache save failed silently - no entry for ${CACHE_KEY}. Every subsequent build will be a ~70min cold build."
++            exit 1
++          fi
++          echo "Cache verified: ${n} entry/entries for ${CACHE_KEY}"
+diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
+new file mode 100644
+index 00000000..3e8fc633
+--- /dev/null
++++ b/.nqaf/prompts/feature-001.md
+@@ -0,0 +1,122 @@
++# CI: fork-local macOS DMG workflow with a working dependency cache
++
++## Problem [feature-001]
++
++This repo (`fork.txt`) has no way to build a macOS `.dmg` from a feature
++branch. Upstream's `.github/workflows/macports.yml` is a reusable workflow
++whose artifact-upload steps are gated on `github.event_name ==
++'pull_request'` or `github.ref == 'refs/heads/master'`. Those read the
++*caller's* triggering event, so a push-triggered caller runs the whole
++1-3h build and uploads nothing; no `workflow_call` input changes that, and
++`macports.yml` declares no outputs, so the DMG can't be handed back either.
++
++Upstream's MacPorts dependency cache is also broken, so every macOS build is
++a ~70-75 minute cold build (Install Dependencies is ~69 of ~76 minutes).
++`actions/cache` runs `tar` as the unprivileged `runner` user for both save
++and restore, but every port is installed with `sudo port`, leaving
++`/opt/local` full of root-owned files:
++
++- **Save**: bsdtar exits 1 on the first unreadable file (dbus's setuid,
++  non-world-readable `dbus-daemon-launch-helper`, pulled in transitively by
++  glib2 — it can't be dropped from the port list). The save action
++  downgrades this to a warning and reports success, so it goes unnoticed.
++  Upstream's existing cleanup only chmods directories under
++  `/opt/local/var`, which misses that file.
++- **Restore**: even with a saved entry, gtar extracts as `runner`, can't
++  `utime` root-owned directories, and can't overwrite the root-owned files
++  that `sudo port sync` (in "Amend macports configuration") has already
++  repopulated under `/opt/local/var/macports/sources` ("Cannot open: File
++  exists"). It exits non-zero and `actions/cache` reports "Cache not found
++  for input keys" after downloading the whole ~880MB.
++- Upstream uses `Lord-Kamina/always-upload-cache`, whose restore does not
++  populate its documented `cache-hit` output, so consumers always see a
++  miss; and its `refresh-cache: true` deletes the matched entry before
++  re-saving, which from a feature branch would destroy the
++  default-branch-scoped entry every branch depends on.
++
++## Fix
++
++Add a new, fork-local workflow `.github/workflows/earlye-mac-dmg.yml`
++(name: "Earlye macOS DMG"). It must be a file upstream does not have, so it
++survives `git rebase upstream/master` with no conflicts. Do **not** modify
++upstream's workflows (`macports.yml`, `build_and_release.yml`, etc.) or any
++non-CI file. Start the file with a comment explaining that it is fork-local
++and why it is standalone rather than calling `macports.yml`.
++
++Triggers, permissions, concurrency:
++
++- `push` to any branch except `master` (master pushes are upstream syncs),
++  plus `workflow_dispatch` with inputs `arch` (choice: `arm64` default,
++  `intel`, `both`) and `deployment_target` (optional string override; blank
++  means 15.0 for arm64, 12.0 for intel).
++- `permissions: contents: read, actions: write`.
++- Concurrency group per ref; cancel in progress except on `master` (master
++  runs seed the cache and must not be killed).
++
++Jobs:
++
++1. A small `choose` job on `ubuntu-latest` that turns the inputs into a
++   matrix `include` JSON: arm64 = `macos-26` / target `15.0`, intel =
++   `macos-15-intel` / target `12.0`, with the target override applied to
++   both when given.
++2. A `dmg` job over that matrix (`fail-fast: false`, `timeout-minutes: 350`
++   so it fails visibly rather than hitting the 360 ceiling), with the same
++   `BOOST_VERSION` and `MACOS_DEPS` port list as upstream's `macports.yml`.
++
++The `dmg` job's steps, in order:
++
++- Checkout into `performous/` with `fetch-depth: 0` (for `git describe`).
++- Compute a version: take `git describe --tags --abbrev=0`, keep the leading
++  numeric `X[.Y[.Z]]`, pad to exactly three components (default `1.0.0`),
++  and emit `package_version=<X.Y.Z>+git-<short sha>`. `macos-bundler.py`
++  does an anchored `re.match` for three components and dereferences the
++  result unconditionally, so anything else crashes it. Also emit the short
++  SHA and a filesystem-safe copy of the ref name.
++- Install MacPorts via `Lord-Kamina/setup-macports` **pinned to a commit
++  SHA**, with `enable-cache: 'false'`.
++- "Amend macports configuration", "Generate versions file for cache-key"
++  and the cache-key computation (`macports-<os>-<hashFiles('cache-key.txt')>`)
++  copied **byte-identical** from upstream's `macports.yml`, so the cache key
++  matches upstream's. Note in a comment that these must be re-synced when
++  upstream changes them.
++- Before restoring: `sudo chown -R` `/opt/local` to the runner user, and
++  `/Applications/MacPorts` only if that directory exists.
++- Restore with stock `actions/cache/restore@v4` (paths `/opt/local/` and
++  `/Applications/MacPorts/`), not the always-upload-cache fork. Explain why
++  in a comment.
++- Unlink Homebrew and Install Dependencies as upstream does, branching on the
++  stock action's `cache-hit` output.
++- Tar up the MacPorts logs/build dirs (`if: !cancelled()`).
++- "Prepare /opt/local for caching": upstream's `find ... -perm 700 -exec
++  chmod 755`, then `sudo chown -R` to the runner user and `sudo chmod -R
++  a+rX` on `/opt/local`, and the same on `/Applications/MacPorts` **only if
++  it exists** (it isn't on every runner image, and an unguarded chmod/chown
++  exits 1 and fails the job), then `sudo xattr -c -rsv /opt/local`.
++- Save with stock `actions/cache/save@v4`, only when
++  `github.ref == 'refs/heads/master'` **and** the restore missed. Only the
++  default-branch scope is readable by every branch; feature-branch saves
++  burn ~880MB of the 10GB quota each and can evict master's entry. Never use
++  `refresh-cache`.
++- Build with `osx-utils/macos-bundler.py --flat-output --verify-bundle`,
++  passing the computed `--package-version`, `--target`, and
++  `--enable-webserver=on --enable-midi=on --enable-webcam=on
++  --build-tests=on --prefer-macports`.
++- Run unit tests (`build/testing/performous_test --gtest_filter=UnitTest*`
++  and `make test` in `build/`).
++- Upload the DMG with `actions/upload-artifact`, named
++  `Performous-<safe ref>-<short sha>-<arch>-macos<target>`,
++  `if-no-files-found: error`, 14-day retention.
++- A job summary (`if: always()` once the artifact name is set) listing
++  branch, commit, runner/target, artifact name, cache hit/MISS, and the
++  `xattr -dr com.apple.quarantine` command needed for the unsigned app.
++- Upload the MacPorts logs artifact.
++- Last step, with the same master-and-miss gate as the save: verify the cache
++  entry exists by querying
++  `GET /repos/<repo>/actions/caches?key=<key>` with `curl` and parsing with
++  single-line `python3 -c` (not `gh` — "Unlink Homebrew" removes it from
++  PATH). Fail with an `::error::` if `total_count` is 0. It runs after the
++  DMG upload so a cache regression fails the run without costing the
++  artifact.
++
++Pin third-party (non-`actions/*`) actions to commit SHAs rather than moving
++refs. Do not make any other changes.
