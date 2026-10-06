@@ -1,0 +1,63 @@
+From 9d2369ec2526725e814b3be818b665d5bbbafe09 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 29 Sep 2026 23:07:26 +0000
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md | 29 +++++++++++++++++++++++++++++
+ README.md                    |  6 ++++++
+ 2 files changed, 35 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 000000000..7c9c49596
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,29 @@
++# Bootstrap: mark this repo as a fork tracked via NQAF
++
++## Problem [feature-000]
++
++This repo (`fork.txt`) is a straight mirror of `upstream.txt`
++(`tursodatabase/turso`) with no indication in the repo itself that it
++carries locally-applied fixes, or where to find them.
++
++## Fix
++
++Add a short `## About This Fork` section near the top of `README.md`: after
++the centred logo/badge block and its `---` separator, and before the
++`## About` section. State:
++
++- This repository is a fork of the upstream project (link to
++  `https://github.com/tursodatabase/turso`).
++- It carries a set of security and correctness fixes applied on top of
++  upstream, tracked as prompts rather than as a diverging code history.
++- Anyone re-mirroring this fork from a newer upstream release should look at
++  the prompts that produced the current fixes (do not hardcode a path to the
++  `nqaf` repo here — just say "see the fork's NQAF prompt history").
++
++Do not modify any `Cargo.toml` `repository`/`homepage` metadata fields, or
++package metadata in the bindings (`package.json`, `pyproject.toml`, etc.).
++This project is consumed as a git dependency, not published under a new
++name, so there is no registry discoverability problem to solve by rewriting
++package metadata — doing so would be speculative scope creep.
++
++Do not make any other changes.
+diff --git a/README.md b/README.md
+index 822d3209c..63d0636ed 100644
+--- a/README.md
++++ b/README.md
+@@ -29,6 +29,12 @@
+ 
+ ---
+ 
++## About This Fork
++
++This repository is a fork of the upstream [Turso Database](https://github.com/tursodatabase/turso) project. It carries a set of security and correctness fixes applied on top of upstream, tracked as prompts rather than as a diverging code history.
++
++If you are re-mirroring this fork from a newer upstream release, see the fork's NQAF prompt history for the prompts that produced the current fixes, and re-apply them.
++
+ ## About
+ 
+ Turso Database is an in-process SQL database written in Rust, compatible with SQLite. It runs in production today at multiple organizations — see the [FAQ](#faq) for where the project stands on its way to 1.0.

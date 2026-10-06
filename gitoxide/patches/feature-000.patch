@@ -1,0 +1,63 @@
+From 0a7b87ce5afba3c68df8098052965cf729a13b4d Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Sun, 9 Aug 2026 16:04:19 -0500
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md | 28 ++++++++++++++++++++++++++++
+ README.md                    |  7 +++++++
+ 2 files changed, 35 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 000000000..3b1d8dc49
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,28 @@
++# Bootstrap: mark this repo as a fork tracked via NQAF
++
++## Problem [feature-000]
++
++This repo (`fork.txt`) is a straight mirror of `upstream.txt`
++(`GitoxideLabs/gitoxide`) with no indication in the repo itself that it
++carries locally-applied fixes, or where to find them.
++
++## Fix
++
++Add a short section near the top of `README.md`, right after the intro
++paragraph and before the crate/feature documentation, stating:
++
++- This repository is a fork of the upstream project (link to the URL in
++  `upstream.txt`).
++- It carries a set of security and correctness fixes applied on top of
++  upstream, tracked as prompts rather than as a diverging code history.
++- Anyone re-mirroring this fork from a newer upstream release should look at
++  the prompts that produced the current fixes (do not hardcode a path to the
++  `nqaf` repo here — just say "see the fork's NQAF prompt history").
++
++Do not modify any `Cargo.toml` `repository`/`homepage` metadata fields across
++the workspace. This project is consumed as a git dependency, not published to
++crates.io under a new name, so there is no crates.io/docs.rs discoverability
++problem to solve by rewriting package metadata — doing so would be
++speculative scope creep.
++
++Do not make any other changes.
+diff --git a/README.md b/README.md
+index 0e3b5d4ec..8dadbe541 100644
+--- a/README.md
++++ b/README.md
+@@ -5,6 +5,13 @@
+ `gitoxide` is an implementation of `git` written in Rust for developing future-proof applications which strive for correctness and
+ performance while providing a pleasant and unsurprising developer experience.
+ 
++## About This Fork
++
++This repository is a fork of [GitoxideLabs/gitoxide](https://github.com/GitoxideLabs/gitoxide). It carries a set of
++security and correctness fixes applied on top of upstream, tracked as prompts rather than as a diverging code
++history. Anyone re-mirroring this fork from a newer upstream release should look at the fork's NQAF prompt history
++to find the fixes that need to be reapplied.
++
+ There are two primary ways to use `gitoxide`:
+ 
+ 1. **As Rust library**: Use the [`gix`](https://docs.rs/gix) crate as a Cargo dependency for API access.

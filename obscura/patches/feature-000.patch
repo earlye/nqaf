@@ -1,0 +1,59 @@
+From bc08298bbf0b1a04905bb56c2aad4ad5b30681b0 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 12:47:30 -0500
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md | 27 +++++++++++++++++++++++++++
+ README.md                    |  4 ++++
+ 2 files changed, 31 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 0000000..bf7208f
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,27 @@
++# Bootstrap: mark this repo as a fork tracked via NQAF
++
++## Problem [feature-000]
++
++This repo (`fork.txt`) is a straight mirror of `upstream.txt`
++(`h4ckf0r0day/obscura`) with no indication in the repo itself that it carries
++locally-applied fixes, or where to find them.
++
++## Fix
++
++Add a short section near the top of `README.md`, right after the intro
++paragraph and before the feature/comparison table, stating:
++
++- This repository is a fork of the upstream project (link to the URL in
++  `upstream.txt`).
++- It carries a set of security and correctness fixes applied on top of
++  upstream, tracked as prompts rather than as a diverging code history.
++- Anyone re-mirroring this fork from a newer upstream release should look at
++  the prompts that produced the current fixes (do not hardcode a path to the
++  `nqaf` repo here — just say "see the fork's NQAF prompt history").
++
++Do not modify any `Cargo.toml` `repository`/`homepage` metadata fields. This
++project is consumed as a git dependency, not published to crates.io under a
++new name, so there is no crates.io/docs.rs discoverability problem to solve
++by rewriting package metadata — doing so would be speculative scope creep.
++
++Do not make any other changes.
+diff --git a/README.md b/README.md
+index b69e1a6..ac1dda9 100644
+--- a/README.md
++++ b/README.md
+@@ -20,6 +20,10 @@
+ 
+ Obscura is a headless browser engine written in Rust, built for web scraping and AI agent automation. It runs real JavaScript via V8, supports the Chrome DevTools Protocol, and acts as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
+ 
++### About this fork
++
++This repository is a fork of [h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura). It carries a set of security and correctness fixes applied on top of upstream, tracked as prompts rather than as a diverging code history. Anyone re-mirroring this fork from a newer upstream release should look at the fork's NQAF prompt history to see which fixes to reapply.
++
+ ### Why Obscura over headless Chrome?
+ 
+ Designed for automation at scale, not desktop browsing.

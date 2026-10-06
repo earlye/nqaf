@@ -1,0 +1,307 @@
+From 8c49798ed11a204b06c99b384375eb6bccc8b47b Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Fri, 7 Aug 2026 15:55:42 -0500
+Subject: [PATCH] Apply feature-011.md
+
+---
+ .nqaf/prompts/feature-011.md             | 53 +++++++++++++++++++++++
+ README.md                                | 28 ++++++++++++
+ crates/obscura-browser/src/lib.rs        |  3 ++
+ crates/obscura-js/src/lib.rs             |  1 +
+ crates/obscura-js/src/ops.rs             |  7 +++
+ crates/obscura-js/src/telemetry.rs       | 54 ++++++++++++++++++++++++
+ crates/obscura/examples/dom_telemetry.rs | 38 +++++++++++++++++
+ crates/obscura/src/lib.rs                |  5 +++
+ 8 files changed, 189 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-011.md
+ create mode 100644 crates/obscura-js/src/telemetry.rs
+ create mode 100644 crates/obscura/examples/dom_telemetry.rs
+
+diff --git a/.nqaf/prompts/feature-011.md b/.nqaf/prompts/feature-011.md
+new file mode 100644
+index 0000000..39fc67f
+--- /dev/null
++++ b/.nqaf/prompts/feature-011.md
+@@ -0,0 +1,53 @@
++# Fix: Provide native rust events for dom changes
++
++## Problem [feature-011]
++
++You are an expert Rust systems engineer modifying our codebase fork of
++Obscura. Our goal is to expose a thread-safe, high-performance DOM
++change event stream that an external Rust automation engine housing
++this fork can consume seamlessly.
++
++Because Obscura's V8 engine loop (`deno_core` ops) runs on a `!Send`
++thread-local architecture, we cannot safely pass closures or direct
++cross-thread pointers into the ops layer. Instead, implement a
++lock-free, global unbounded telemetry channel using
++`crossbeam-channel` or `tokio::sync::mpsc`.
++
++Please implement the following changes precisely, keeping in mind
++Obscura's performance-first architecture:
++
++1. Create a `telemetry` module (or modify `obscura-js/src/ops.rs`
++   directly) to define a thread-safe `TelemetryDomEvent` enum. Include
++   variants for node insertions, node removals, and attribute changes,
++   passing only lightweight types (like atomic node IDs as `u32` or
++   static identifiers) to avoid cloning massive strings inside the V8
++   execution path.
++
++2. Initialize a global lazy static channel (`once_cell::sync::Lazy`)
++   that exposes a `Sender<TelemetryDomEvent>` and a
++   `Receiver<TelemetryDomEvent>`.
++
++3. Provide a public function `pub fn subscribe_dom_changes() ->
++   crossbeam_channel::Receiver<TelemetryDomEvent>` (or an async
++   equivalent if tokio is preferred) that our containing automation
++   engine can pull from.
++
++4. Locate the central Deno/V8 bindings within `obscura-js/src/ops.rs`
++   (such as `#[op] fn op_dom_insert_before` or related structural
++   mutation ops). Wrap these operations so that every time a DOM
++   change executes, a fire-and-forget payload is dispatched
++   immediately out of the thread-local environment to our telemetry
++   queue.
++
++5. Provide a usage example showing how our companion Rust automation
++   framework can run a background thread loop to monitor these
++   streaming `TelemetryDomEvent` items without deadlocking Obscura's
++   engine or dropping frames.
++
++Ensure all additions conform to Obscura's existing crate layout, avoid
++introducing blocking locks inside `#[op]` macros, and pass `cargo
++clippy` guidelines.
++
++Update the fork README to include a subsection in "About this fork"
++called "Fork Features", and a subsection underneath that describing
++this feature and how to use it.
+diff --git a/README.md b/README.md
+index ac1dda9..2cb72cf 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,34 @@ Obscura is a headless browser engine written in Rust, built for web scraping and
+ 
+ This repository is a fork of [h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura). It carries a set of security and correctness fixes applied on top of upstream, tracked as prompts rather than as a diverging code history. Anyone re-mirroring this fork from a newer upstream release should look at the fork's NQAF prompt history to see which fixes to reapply.
+ 
++### Fork Features
++
++In addition to upstream fixes, this fork adds capabilities for the automation engine that embeds it.
++
++#### DOM change telemetry stream
++
++`op_dom`'s structural mutation commands (`append_child`, `remove_child`, `insert_before`, `set_attribute`, `remove_attribute`, ...) run on V8's thread-local, `!Send` engine loop, so they can't hand a closure or pointer to a consumer on another thread. Instead, each mutation pushes a lightweight `TelemetryDomEvent` (an atomic node ID plus, for attribute changes, the attribute name — never node content) into a process-wide unbounded `tokio::sync::mpsc` queue, so emitting one costs nothing measurable on the hot DOM path and never blocks the engine loop.
++
++A companion Rust process consumes the stream with `obscura::subscribe_dom_changes()`, which returns the receiver on the first call only (the channel is single-consumer):
++
++```rust
++use obscura::{Browser, TelemetryDomEvent};
++
++let mut events = obscura::subscribe_dom_changes().expect("dom telemetry already subscribed");
++
++std::thread::spawn(move || {
++    while let Some(event) = events.blocking_recv() {
++        match event {
++            TelemetryDomEvent::NodeInserted { node_id, parent_id } => { /* ... */ }
++            TelemetryDomEvent::NodeRemoved { node_id } => { /* ... */ }
++            TelemetryDomEvent::AttributeChanged { node_id, name } => { /* ... */ }
++        }
++    }
++});
++```
++
++See `crates/obscura/examples/dom_telemetry.rs` for a runnable end-to-end example.
++
+ ### Why Obscura over headless Chrome?
+ 
+ Designed for automation at scale, not desktop browsing.
+diff --git a/crates/obscura-browser/src/lib.rs b/crates/obscura-browser/src/lib.rs
+index c715344..b0bd644 100644
+--- a/crates/obscura-browser/src/lib.rs
++++ b/crates/obscura-browser/src/lib.rs
+@@ -10,3 +10,6 @@ pub use obscura_js::HTML_TO_MARKDOWN_JS;
+ // Re-exported so the embeddable `obscura` crate (which depends on obscura-browser,
+ // not obscura-js) can surface the interception channel types.
+ pub use obscura_js::ops::{InterceptResolution, InterceptedRequest};
++// Re-exported for the same reason: the global DOM-mutation telemetry stream
++// (feature-011) lives in obscura-js next to the ops that emit it.
++pub use obscura_js::telemetry::{subscribe_dom_changes, TelemetryDomEvent};
+diff --git a/crates/obscura-js/src/lib.rs b/crates/obscura-js/src/lib.rs
+index 5217f63..4ba121a 100644
+--- a/crates/obscura-js/src/lib.rs
++++ b/crates/obscura-js/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod cdp_watchdog;
+ pub mod module_loader;
+ pub mod runtime;
+ pub mod ops;
++pub mod telemetry;
+ pub mod v8_flags;
+ pub mod v8_lock;
+ pub mod markdown;
+diff --git a/crates/obscura-js/src/ops.rs b/crates/obscura-js/src/ops.rs
+index b942467..8a615ad 100644
+--- a/crates/obscura-js/src/ops.rs
++++ b/crates/obscura-js/src/ops.rs
+@@ -8,6 +8,7 @@ use deno_core::OpState;
+ use deno_core::Extension;
+ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+ use obscura_dom::{DomTree, NodeData, NodeId};
++use crate::telemetry::{emit_dom_event, TelemetryDomEvent};
+ use obscura_net::{CallbackRegistry, CookieJar, ObscuraHttpClient, RequestInfo, ResourceType, Response};
+ #[cfg(feature = "stealth")]
+ use obscura_net::StealthHttpClient;
+@@ -319,6 +320,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
+                 } else {
+                     dom.with_node_mut(node_id, |n| n.set_attribute(name, value.to_string()));
+                 }
++                emit_dom_event(TelemetryDomEvent::AttributeChanged { node_id: nid, name: name.to_string() });
+             }
+             "true".into()
+         }
+@@ -337,17 +339,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
+             let parent = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
+             let child = match arg2.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
+             dom.append_child(NodeId::new(parent), NodeId::new(child));
++            emit_dom_event(TelemetryDomEvent::NodeInserted { node_id: child, parent_id: parent });
+             "true".into()
+         }
+         "remove_child" => {
+             let child = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
+             dom.remove_child(NodeId::new(child));
++            emit_dom_event(TelemetryDomEvent::NodeRemoved { node_id: child });
+             "true".into()
+         }
+         "insert_before" => {
+             let new_node = match arg1.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
+             let ref_node = match arg2.parse::<u32>() { Ok(n) => n, Err(_) => return "false".into() };
++            let parent_id = dom.with_node(NodeId::new(ref_node), |n| n.parent).flatten().map(|p| p.index() as u32).unwrap_or(0);
+             dom.insert_before(NodeId::new(ref_node), NodeId::new(new_node));
++            emit_dom_event(TelemetryDomEvent::NodeInserted { node_id: new_node, parent_id });
+             "true".into()
+         }
+         "remove_attribute" => {
+@@ -357,6 +363,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
+                     attrs.retain(|a| a.name.local.as_ref() != arg2.as_str());
+                 }
+             });
++            emit_dom_event(TelemetryDomEvent::AttributeChanged { node_id: nid, name: arg2.clone() });
+             "true".into()
+         }
+         "set_inner_html" => {
+diff --git a/crates/obscura-js/src/telemetry.rs b/crates/obscura-js/src/telemetry.rs
+new file mode 100644
+index 0000000..3503e1d
+--- /dev/null
++++ b/crates/obscura-js/src/telemetry.rs
+@@ -0,0 +1,54 @@
++//! Global DOM-mutation event stream.
++//!
++//! `op_dom`'s mutation commands run on V8's thread-local, `!Send` engine
++//! loop, so they can't hold a direct reference to a consumer living on
++//! another thread. Instead they push lightweight [`TelemetryDomEvent`]
++//! values into a process-wide `tokio::sync::mpsc` queue that an external
++//! automation thread drains via [`subscribe_dom_changes`]. `send` on an
++//! unbounded sender never blocks and never locks, so this is safe to call
++//! from inside a `#[op2]` body.
++
++use std::sync::{Mutex, OnceLock};
++
++use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
++
++/// A DOM structural mutation, reported with only the identifiers needed to
++/// look the change back up — never the node's content — so emitting one
++/// inside the V8 execution path stays cheap regardless of subtree size.
++#[derive(Debug, Clone)]
++pub enum TelemetryDomEvent {
++    NodeInserted { node_id: u32, parent_id: u32 },
++    NodeRemoved { node_id: u32 },
++    AttributeChanged { node_id: u32, name: String },
++}
++
++struct Channel {
++    sender: UnboundedSender<TelemetryDomEvent>,
++    receiver: Mutex<Option<UnboundedReceiver<TelemetryDomEvent>>>,
++}
++
++static CHANNEL: OnceLock<Channel> = OnceLock::new();
++
++fn channel() -> &'static Channel {
++    CHANNEL.get_or_init(|| {
++        let (sender, receiver) = unbounded_channel();
++        Channel { sender, receiver: Mutex::new(Some(receiver)) }
++    })
++}
++
++/// Fire-and-forget dispatch used by `op_dom`'s mutation commands. Never
++/// blocks; silently drops the event if nobody is subscribed yet (an
++/// unbounded sender only errs once every receiver has been dropped, which
++/// can't happen here since the global `Channel` holds one for the process
++/// lifetime).
++pub fn emit_dom_event(event: TelemetryDomEvent) {
++    let _ = channel().sender.send(event);
++}
++
++/// Take the process-wide DOM-mutation receiver. The underlying channel is
++/// single-consumer, so this returns `Some` on the first call and `None`
++/// afterwards — hand the receiver to whichever task or thread owns
++/// consuming the stream, then keep it there.
++pub fn subscribe_dom_changes() -> Option<UnboundedReceiver<TelemetryDomEvent>> {
++    channel().receiver.lock().unwrap().take()
++}
+diff --git a/crates/obscura/examples/dom_telemetry.rs b/crates/obscura/examples/dom_telemetry.rs
+new file mode 100644
+index 0000000..bc44a96
+--- /dev/null
++++ b/crates/obscura/examples/dom_telemetry.rs
+@@ -0,0 +1,38 @@
++/// Drains the global DOM-mutation telemetry stream (feature-011) from a
++/// background thread while the browser drives a page, showing how a
++/// companion automation process can observe DOM changes without blocking
++/// or slowing down Obscura's own engine loop.
++use obscura::{Browser, TelemetryDomEvent};
++
++#[tokio::main]
++async fn main() -> anyhow::Result<()> {
++    // Subscribe before driving any page: the channel is single-consumer, so
++    // `subscribe_dom_changes()` returns `None` on every call after the first.
++    let mut events = obscura::subscribe_dom_changes().expect("dom telemetry already subscribed");
++
++    // `blocking_recv` parks this thread, not the tokio runtime or the V8
++    // engine loop, so it never competes with page execution.
++    std::thread::spawn(move || {
++        while let Some(event) = events.blocking_recv() {
++            match event {
++                TelemetryDomEvent::NodeInserted { node_id, parent_id } => {
++                    println!("[dom] node {node_id} inserted under {parent_id}");
++                }
++                TelemetryDomEvent::NodeRemoved { node_id } => {
++                    println!("[dom] node {node_id} removed");
++                }
++                TelemetryDomEvent::AttributeChanged { node_id, name } => {
++                    println!("[dom] node {node_id} attribute `{name}` changed");
++                }
++            }
++        }
++    });
++
++    let browser = Browser::builder().build()?;
++    let mut page = browser.new_page().await?;
++    page.goto("https://example.com").await?;
++    page.evaluate("document.body.appendChild(document.createElement('div'))");
++    page.settle(200).await;
++
++    Ok(())
++}
+diff --git a/crates/obscura/src/lib.rs b/crates/obscura/src/lib.rs
+index 78e366c..d5f4ce3 100644
+--- a/crates/obscura/src/lib.rs
++++ b/crates/obscura/src/lib.rs
+@@ -30,3 +30,8 @@ pub use page::Page;
+ // Request/response interception types (issue #306).
+ pub use obscura_browser::{InterceptedRequest, InterceptResolution};
+ pub use obscura_net::{RequestCallback, RequestInfo, ResourceType, Response, ResponseCallback};
++
++// Global DOM-mutation telemetry stream (feature-011): a companion automation
++// process subscribes once and drains it from a background thread/task,
++// independent of any particular `Page`.
++pub use obscura_browser::{subscribe_dom_changes, TelemetryDomEvent};

@@ -1,0 +1,840 @@
+From 94a3670e36f475dcf5b31057a0440e4db527227b Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 13:37:08 -0500
+Subject: [PATCH] Apply feature-006.md
+
+---
+ .nqaf/prompts/feature-006.md |  74 +++++
+ crates/obscura-js/src/ops.rs | 569 ++++++++++++++++++++++++-----------
+ 2 files changed, 470 insertions(+), 173 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-006.md
+
+diff --git a/.nqaf/prompts/feature-006.md b/.nqaf/prompts/feature-006.md
+new file mode 100644
+index 0000000..4486036
+--- /dev/null
++++ b/.nqaf/prompts/feature-006.md
+@@ -0,0 +1,74 @@
++# Fix: unbounded WebCrypto derive-bits parameters, and inconsistent op panic-guarding
++
++## Problem [feature-006]
++
++Three related gaps in `obscura-js`'s native op layer (the Rust functions that
++back JS-visible APIs like `crypto.subtle`):
++
++**1. Unbounded iteration count → unkillable hang.** The PBKDF2 op
++(`crypto.subtle.deriveBits({name:'PBKDF2', ...iterations})`) takes the
++caller-supplied `iterations` as a `u32` with no upper bound, and runs that many
++HMAC iterations synchronously inside the native op — not as V8 bytecode. This
++project's execution watchdog (whatever mechanism terminates a runaway script,
++e.g. `terminate_execution`-style V8 termination) only takes effect when V8
++resumes running script; it cannot interrupt a Rust loop already running inside
++a synchronous op. A page calling
++`crypto.subtle.deriveBits({name:'PBKDF2', hash:'SHA-256', salt, iterations: 4000000000}, key, 8)`
++can hang script execution for as long as ~4 billion HMAC iterations take,
++regardless of any timeout/deadline the embedder has configured — those
++deadlines are implemented the same way (they can't preempt a non-yielding
++synchronous op either).
++
++**2. Unbounded output length → uncatchable OOM abort.** The same op (and the
++HKDF equivalent) allocates its output buffer directly from the caller-supplied
++`length` parameter with no cap — up to ~4 GiB can be requested per call. This
++allocation happens on Rust's own heap, entirely outside whatever heap ceiling
++the JS engine itself enforces (e.g. V8's `--max-old-space-size`). A failed
++allocation at that size aborts the process via the Rust allocator's
++out-of-memory path, which is not something a panic handler can catch.
++
++**3. Inconsistent panic-guarding across ops.** Only a handful of the
++registered ops (something like 4 out of ~20+) are wrapped in
++`std::panic::catch_unwind` so that a panic degrades to a null/error result
++instead of aborting the process. The rest have no such wrapper. No live panic
++is currently reachable through the unwrapped ops (this was checked — key/IV/
++length validation is done via explicit `match`/`if` returning `Err` rather than
++`.unwrap()`), but nothing structurally prevents a future op, or a small edit to
++an existing unwrapped one, from introducing a page-triggerable panic that
++aborts the whole process instead of degrading gracefully.
++
++## Fix
++
++1. Cap `iterations` for PBKDF2 (and any other iterative KDF/hash op with a
++   caller-supplied iteration count) to a fixed, generous-but-bounded maximum
++   (pick something well above any legitimate use — e.g. in the low millions —
++   and make it easy to find/adjust as a named constant). Reject anything above
++   the cap with a normal `Err`/JS exception rather than silently clamping it,
++   so callers get a clear signal rather than a surprising truncation.
++2. Cap the output `length` parameter the same way (a named constant, rejected
++   with an error above the cap), consistent with how `crypto.getRandomValues`
++   in this codebase already caps its own length parameter — use the same style
++   of bound for consistency.
++3. Establish a single, enforced wrapping mechanism for every registered op
++   (not just the ones that happen to need it today), so a panic anywhere in
++   the op layer degrades to an error result instead of aborting. Prefer a
++   pattern that's structurally hard to skip — e.g. a single registration
++   helper that all ops go through and that applies the `catch_unwind` wrapper
++   uniformly, rather than requiring each op author to remember to add it
++   individually. Add a test (or a build-time/lint-time check, if practical)
++   that would catch a newly-added op that bypasses the wrapper.
++4. Add regression tests: PBKDF2/HKDF calls above the iteration/length caps are
++   rejected quickly (not run to completion first); calls at or below the caps
++   still succeed; and a deliberately panicking op (introduced only in the test)
++   degrades to an error rather than crashing the test process.
++
++## Why this matters
++
++(1) and (2) are both page-triggerable denial-of-service primitives that this
++project's existing timeout/watchdog machinery cannot stop, since they hang or
++abort inside native code rather than JS bytecode — exactly the class of bug
++this project's own documented threat model calls out as in-scope
++("availability... a page that defeats the termination watchdog... and so
++hangs or aborts the process"). (3) is not an active bug today but removes the
++safety margin that would otherwise catch a future regression before it
++reaches production.
+diff --git a/crates/obscura-js/src/ops.rs b/crates/obscura-js/src/ops.rs
+index ce60b78..b942467 100644
+--- a/crates/obscura-js/src/ops.rs
++++ b/crates/obscura-js/src/ops.rs
+@@ -148,21 +148,28 @@ fn response_body_byte_limit() -> usize {
+ 
+ pub type SharedState = Rc<RefCell<ObscuraState>>;
+ 
++/// Anti-panic boundary shared by every synchronous op in this file: a panic
++/// inside `f` would otherwise unwind through deno_core into V8's FFI frame,
++/// where V8_Fatal calls abort(3) and takes the whole engine (and every CDP
++/// client) down. Catching it here degrades a single call to `fallback`
++/// instead. `op_name` only labels the log line. This is the single point
++/// every `#[op2]` function below is expected to route its body through; see
++/// `op_safety_tests::every_sync_op_is_panic_guarded` for the check that
++/// enforces it.
++fn op_guard<T>(op_name: &str, fallback: T, f: impl FnOnce() -> T) -> T {
++    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
++        tracing::error!("{op_name} panicked; returning fallback");
++        fallback
++    })
++}
++
+ #[op2]
+ #[string]
+ fn op_dom(state: &OpState, #[string] cmd: String, #[string] arg1: String, #[string] arg2: String) -> String {
+-    // Anti-panic boundary: a panic in a DOM op would unwind through deno_core
+-    // into V8's FFI frame, where V8_Fatal calls abort(3) and takes the whole
+-    // engine (and every CDP client) down. Catch it so one malformed selector or
+-    // inconsistent tree node degrades to a null result for that single call.
+-    // No per-call clone: on the happy path this is just a landing pad, so the
++    // No per-call clone on the happy path: this is just a landing pad, so the
+     // hot DOM path (querySelector/getAttribute/...) pays nothing measurable.
+-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
++    op_guard("op_dom", "null".to_string(), move || {
+         op_dom_inner(state, cmd, arg1, arg2)
+-    }))
+-    .unwrap_or_else(|_| {
+-        tracing::error!("op_dom panicked; returning null");
+-        "null".to_string()
+     })
+ }
+ 
+@@ -535,12 +542,14 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
+ 
+ #[op2(fast)]
+ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
+-    let _ = state;
+-    match level {
+-        "warn" => tracing::warn!(target: "obscura::console", "{}", msg),
+-        "error" => tracing::error!(target: "obscura::console", "{}", msg),
+-        _ => tracing::info!(target: "obscura::console", "{}", msg),
+-    }
++    op_guard("op_console_msg", (), || {
++        let _ = state;
++        match level {
++            "warn" => tracing::warn!(target: "obscura::console", "{}", msg),
++            "error" => tracing::error!(target: "obscura::console", "{}", msg),
++            _ => tracing::info!(target: "obscura::console", "{}", msg),
++        }
++    })
+ }
+ 
+ // op_fetch_url backs JS-level `fetch()` and XHR. Pre-#139 it used a
+@@ -628,6 +637,12 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
+ /// Matches reqwest's default policy of 10.
+ const FETCH_REDIRECT_LIMIT: usize = 10;
+ 
++// op_fetch_url and op_sleep (below) are #[op2(async)]: unlike the sync ops
++// above, their body isn't run synchronously inside the V8 FFI call that
++// dispatches them (only the initial poll is), so a panic here doesn't carry
++// the same abort risk `op_guard` exists to prevent, and `std::panic::
++// catch_unwind` doesn't compose with `.await` anyway. Both are exempted from
++// `tests::every_sync_op_is_panic_guarded` by name for this reason.
+ #[op2(async)]
+ #[string]
+ async fn op_fetch_url(
+@@ -1359,40 +1374,46 @@ pub(crate) fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
+ #[op2]
+ #[string]
+ fn op_get_cookies(state: &OpState) -> String {
+-    let gs = state.borrow::<SharedState>().clone();
+-    let gs = gs.borrow();
+-    let jar = match &gs.cookie_jar {
+-        Some(j) => j,
+-        None => return String::new(),
+-    };
+-    let url = match url::Url::parse(&gs.url) {
+-        Ok(u) => u,
+-        Err(_) => return String::new(),
+-    };
+-    jar.get_js_visible_cookies(&url)
++    op_guard("op_get_cookies", String::new(), || {
++        let gs = state.borrow::<SharedState>().clone();
++        let gs = gs.borrow();
++        let jar = match &gs.cookie_jar {
++            Some(j) => j,
++            None => return String::new(),
++        };
++        let url = match url::Url::parse(&gs.url) {
++            Ok(u) => u,
++            Err(_) => return String::new(),
++        };
++        jar.get_js_visible_cookies(&url)
++    })
+ }
+ 
+ #[op2(fast)]
+ fn op_set_cookie(state: &OpState, #[string] cookie_str: &str) {
+-    let gs = state.borrow::<SharedState>().clone();
+-    let gs = gs.borrow();
+-    let jar = match &gs.cookie_jar {
+-        Some(j) => j,
+-        None => return,
+-    };
+-    let url = match url::Url::parse(&gs.url) {
+-        Ok(u) => u,
+-        Err(_) => return,
+-    };
+-    jar.set_cookie_from_js(cookie_str, &url);
++    op_guard("op_set_cookie", (), || {
++        let gs = state.borrow::<SharedState>().clone();
++        let gs = gs.borrow();
++        let jar = match &gs.cookie_jar {
++            Some(j) => j,
++            None => return,
++        };
++        let url = match url::Url::parse(&gs.url) {
++            Ok(u) => u,
++            Err(_) => return,
++        };
++        jar.set_cookie_from_js(cookie_str, &url);
++    })
+ }
+ 
+ #[op2(fast)]
+ fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[string] body: &str) {
+-    let gs = state.borrow::<SharedState>().clone();
+-    let mut gs = gs.borrow_mut();
+-    gs.url = url.to_string();
+-    gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
++    op_guard("op_navigate", (), || {
++        let gs = state.borrow::<SharedState>().clone();
++        let mut gs = gs.borrow_mut();
++        gs.url = url.to_string();
++        gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
++    })
+ }
+ 
+ #[op2(async)]
+@@ -1405,9 +1426,11 @@ async fn op_sleep(#[number] millis: u64) {
+ // entry, that's how puppeteer's `page.exposeFunction` callbacks fire.
+ #[op2(fast)]
+ fn op_binding_called(state: &OpState, #[string] name: &str, #[string] payload: &str) {
+-    let gs = state.borrow::<SharedState>().clone();
+-    let mut gs = gs.borrow_mut();
+-    gs.pending_binding_calls.push((name.to_string(), payload.to_string()));
++    op_guard("op_binding_called", (), || {
++        let gs = state.borrow::<SharedState>().clone();
++        let mut gs = gs.borrow_mut();
++        gs.pending_binding_calls.push((name.to_string(), payload.to_string()));
++    })
+ }
+ 
+ /// Real WebCrypto `crypto.subtle.digest`. `algorithm` is the SubtleCrypto
+@@ -1418,17 +1441,19 @@ fn op_binding_called(state: &OpState, #[string] name: &str, #[string] payload: &
+ #[op2]
+ #[buffer]
+ fn op_subtle_digest(#[string] algorithm: &str, #[buffer] data: &[u8]) -> Vec<u8> {
+-    use sha1::Digest as _;
+-    let alg = algorithm.to_ascii_uppercase();
+-    match alg.as_str() {
+-        "SHA-1" => sha1::Sha1::digest(data).to_vec(),
+-        "SHA-256" => sha2::Sha256::digest(data).to_vec(),
+-        "SHA-384" => sha2::Sha384::digest(data).to_vec(),
+-        "SHA-512" => sha2::Sha512::digest(data).to_vec(),
+-        "SHA-512/224" => sha2::Sha512_224::digest(data).to_vec(),
+-        "SHA-512/256" => sha2::Sha512_256::digest(data).to_vec(),
+-        _ => vec![],
+-    }
++    op_guard("op_subtle_digest", Vec::new(), || {
++        use sha1::Digest as _;
++        let alg = algorithm.to_ascii_uppercase();
++        match alg.as_str() {
++            "SHA-1" => sha1::Sha1::digest(data).to_vec(),
++            "SHA-256" => sha2::Sha256::digest(data).to_vec(),
++            "SHA-384" => sha2::Sha384::digest(data).to_vec(),
++            "SHA-512" => sha2::Sha512::digest(data).to_vec(),
++            "SHA-512/224" => sha2::Sha512_224::digest(data).to_vec(),
++            "SHA-512/256" => sha2::Sha512_256::digest(data).to_vec(),
++            _ => vec![],
++        }
++    })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1446,6 +1471,21 @@ fn crypto_err(msg: impl std::fmt::Display) -> deno_error::JsErrorBox {
+     deno_error::JsErrorBox::generic(msg.to_string())
+ }
+ 
++/// Upper bound on PBKDF2 `iterations`. PBKDF2-HMAC iterates synchronously
++/// inside `op_subtle_pbkdf2` — V8's termination watchdog can only preempt
++/// script that's running in V8 bytecode, so it cannot interrupt this loop —
++/// making an unbounded caller-supplied iteration count an unkillable-hang
++/// primitive. The cap is chosen well above any realistic KDF work factor
++/// (OWASP's current PBKDF2-SHA256 recommendation is 600,000 iterations).
++const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
++
++/// Upper bound, in bytes, on the derived-bits output length for PBKDF2 and
++/// HKDF. Mirrors `getRandomValues`'s 65536-byte cap in bootstrap.js: both
++/// bound a caller-controlled allocation that lands on Rust's own heap,
++/// outside whatever heap ceiling the JS engine enforces on itself, so an
++/// unbounded value is an OOM-abort primitive rather than a catchable error.
++const MAX_DERIVE_BITS_LENGTH: u32 = 65_536;
++
+ /// HMAC sign. `hash` is a normalized SubtleCrypto hash name; any key length is
+ /// accepted (HMAC pads or hashes the key per RFC 2104). Returns the MAC bytes;
+ /// the shim does the constant-time-insensitive compare for `verify`.
+@@ -1456,20 +1496,22 @@ fn op_subtle_hmac(
+     #[buffer] key: &[u8],
+     #[buffer] data: &[u8],
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+-    use hmac::{Hmac, Mac};
+-    macro_rules! run {
+-        ($d:ty) => {{
+-            let mut mac = Hmac::<$d>::new_from_slice(key).map_err(crypto_err)?;
+-            mac.update(data);
+-            mac.finalize().into_bytes().to_vec()
+-        }};
+-    }
+-    Ok(match hash {
+-        "SHA-1" => run!(sha1::Sha1),
+-        "SHA-256" => run!(sha2::Sha256),
+-        "SHA-384" => run!(sha2::Sha384),
+-        "SHA-512" => run!(sha2::Sha512),
+-        _ => return Err(crypto_err("unsupported HMAC hash")),
++    op_guard("op_subtle_hmac", Err(crypto_err("op_subtle_hmac panicked")), || {
++        use hmac::{Hmac, Mac};
++        macro_rules! run {
++            ($d:ty) => {{
++                let mut mac = Hmac::<$d>::new_from_slice(key).map_err(crypto_err)?;
++                mac.update(data);
++                mac.finalize().into_bytes().to_vec()
++            }};
++        }
++        Ok(match hash {
++            "SHA-1" => run!(sha1::Sha1),
++            "SHA-256" => run!(sha2::Sha256),
++            "SHA-384" => run!(sha2::Sha384),
++            "SHA-512" => run!(sha2::Sha512),
++            _ => return Err(crypto_err("unsupported HMAC hash")),
++        })
+     })
+ }
+ 
+@@ -1486,35 +1528,37 @@ fn op_subtle_aes_gcm(
+     #[buffer] aad: &[u8],
+     #[buffer] data: &[u8],
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+-    use aes_gcm::aead::{Aead, KeyInit, Payload};
+-    use aes_gcm::aes::{Aes192, Aes256};
+-    use aes_gcm::{AesGcm, Nonce};
+-    type Aes192Gcm = AesGcm<Aes192, aes_gcm::aead::consts::U12>;
+-    type Aes256Gcm = AesGcm<Aes256, aes_gcm::aead::consts::U12>;
+-
+-    if iv.len() != 12 {
+-        return Err(crypto_err("AES-GCM requires a 96-bit (12-byte) IV"));
+-    }
+-    let nonce = Nonce::from_slice(iv);
+-    macro_rules! run {
+-        ($ty:ty) => {{
+-            let cipher = <$ty>::new_from_slice(key).map_err(crypto_err)?;
+-            if encrypt {
+-                cipher
+-                    .encrypt(nonce, Payload { msg: data, aad })
+-                    .map_err(|_| crypto_err("AES-GCM encryption failed"))?
+-            } else {
+-                cipher
+-                    .decrypt(nonce, Payload { msg: data, aad })
+-                    .map_err(|_| crypto_err("AES-GCM decryption failed: authentication tag mismatch"))?
+-            }
+-        }};
+-    }
+-    Ok(match key.len() {
+-        16 => run!(aes_gcm::Aes128Gcm),
+-        24 => run!(Aes192Gcm),
+-        32 => run!(Aes256Gcm),
+-        _ => return Err(crypto_err("AES-GCM key must be 128, 192, or 256 bits")),
++    op_guard("op_subtle_aes_gcm", Err(crypto_err("op_subtle_aes_gcm panicked")), || {
++        use aes_gcm::aead::{Aead, KeyInit, Payload};
++        use aes_gcm::aes::{Aes192, Aes256};
++        use aes_gcm::{AesGcm, Nonce};
++        type Aes192Gcm = AesGcm<Aes192, aes_gcm::aead::consts::U12>;
++        type Aes256Gcm = AesGcm<Aes256, aes_gcm::aead::consts::U12>;
++
++        if iv.len() != 12 {
++            return Err(crypto_err("AES-GCM requires a 96-bit (12-byte) IV"));
++        }
++        let nonce = Nonce::from_slice(iv);
++        macro_rules! run {
++            ($ty:ty) => {{
++                let cipher = <$ty>::new_from_slice(key).map_err(crypto_err)?;
++                if encrypt {
++                    cipher
++                        .encrypt(nonce, Payload { msg: data, aad })
++                        .map_err(|_| crypto_err("AES-GCM encryption failed"))?
++                } else {
++                    cipher
++                        .decrypt(nonce, Payload { msg: data, aad })
++                        .map_err(|_| crypto_err("AES-GCM decryption failed: authentication tag mismatch"))?
++                }
++            }};
++        }
++        Ok(match key.len() {
++            16 => run!(aes_gcm::Aes128Gcm),
++            24 => run!(Aes192Gcm),
++            32 => run!(Aes256Gcm),
++            _ => return Err(crypto_err("AES-GCM key must be 128, 192, or 256 bits")),
++        })
+     })
+ }
+ 
+@@ -1528,32 +1572,34 @@ fn op_subtle_aes_cbc(
+     #[buffer] iv: &[u8],
+     #[buffer] data: &[u8],
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+-    use cbc::cipher::block_padding::Pkcs7;
+-    use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+-    use cbc::{Decryptor, Encryptor};
+-
+-    if iv.len() != 16 {
+-        return Err(crypto_err("AES-CBC requires a 16-byte IV"));
+-    }
+-    macro_rules! run {
+-        ($cipher:ty) => {{
+-            if encrypt {
+-                Encryptor::<$cipher>::new_from_slices(key, iv)
+-                    .map_err(crypto_err)?
+-                    .encrypt_padded_vec_mut::<Pkcs7>(data)
+-            } else {
+-                Decryptor::<$cipher>::new_from_slices(key, iv)
+-                    .map_err(crypto_err)?
+-                    .decrypt_padded_vec_mut::<Pkcs7>(data)
+-                    .map_err(|_| crypto_err("AES-CBC decryption failed: invalid padding"))?
+-            }
+-        }};
+-    }
+-    Ok(match key.len() {
+-        16 => run!(aes::Aes128),
+-        24 => run!(aes::Aes192),
+-        32 => run!(aes::Aes256),
+-        _ => return Err(crypto_err("AES-CBC key must be 128, 192, or 256 bits")),
++    op_guard("op_subtle_aes_cbc", Err(crypto_err("op_subtle_aes_cbc panicked")), || {
++        use cbc::cipher::block_padding::Pkcs7;
++        use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
++        use cbc::{Decryptor, Encryptor};
++
++        if iv.len() != 16 {
++            return Err(crypto_err("AES-CBC requires a 16-byte IV"));
++        }
++        macro_rules! run {
++            ($cipher:ty) => {{
++                if encrypt {
++                    Encryptor::<$cipher>::new_from_slices(key, iv)
++                        .map_err(crypto_err)?
++                        .encrypt_padded_vec_mut::<Pkcs7>(data)
++                } else {
++                    Decryptor::<$cipher>::new_from_slices(key, iv)
++                        .map_err(crypto_err)?
++                        .decrypt_padded_vec_mut::<Pkcs7>(data)
++                        .map_err(|_| crypto_err("AES-CBC decryption failed: invalid padding"))?
++                }
++            }};
++        }
++        Ok(match key.len() {
++            16 => run!(aes::Aes128),
++            24 => run!(aes::Aes192),
++            32 => run!(aes::Aes256),
++            _ => return Err(crypto_err("AES-CBC key must be 128, 192, or 256 bits")),
++        })
+     })
+ }
+ 
+@@ -1568,36 +1614,38 @@ fn op_subtle_aes_ctr(
+     counter_length: u32,
+     #[buffer] data: &[u8],
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+-    use ctr::cipher::{KeyIvInit, StreamCipher};
++    op_guard("op_subtle_aes_ctr", Err(crypto_err("op_subtle_aes_ctr panicked")), || {
++        use ctr::cipher::{KeyIvInit, StreamCipher};
+ 
+-    if counter.len() != 16 {
+-        return Err(crypto_err("AES-CTR requires a 16-byte counter block"));
+-    }
+-    let mut buf = data.to_vec();
+-    macro_rules! run {
+-        ($ty:ty) => {{
+-            <$ty>::new_from_slices(key, counter)
+-                .map_err(crypto_err)?
+-                .apply_keystream(&mut buf);
+-        }};
+-    }
+-    macro_rules! by_key {
+-        ($flavor:ident) => {
+-            match key.len() {
+-                16 => run!(ctr::$flavor<aes::Aes128>),
+-                24 => run!(ctr::$flavor<aes::Aes192>),
+-                32 => run!(ctr::$flavor<aes::Aes256>),
+-                _ => return Err(crypto_err("AES-CTR key must be 128, 192, or 256 bits")),
+-            }
+-        };
+-    }
+-    match counter_length {
+-        128 => by_key!(Ctr128BE),
+-        64 => by_key!(Ctr64BE),
+-        32 => by_key!(Ctr32BE),
+-        _ => return Err(crypto_err("AES-CTR supports counter lengths of 32, 64, or 128 bits")),
+-    }
+-    Ok(buf)
++        if counter.len() != 16 {
++            return Err(crypto_err("AES-CTR requires a 16-byte counter block"));
++        }
++        let mut buf = data.to_vec();
++        macro_rules! run {
++            ($ty:ty) => {{
++                <$ty>::new_from_slices(key, counter)
++                    .map_err(crypto_err)?
++                    .apply_keystream(&mut buf);
++            }};
++        }
++        macro_rules! by_key {
++            ($flavor:ident) => {
++                match key.len() {
++                    16 => run!(ctr::$flavor<aes::Aes128>),
++                    24 => run!(ctr::$flavor<aes::Aes192>),
++                    32 => run!(ctr::$flavor<aes::Aes256>),
++                    _ => return Err(crypto_err("AES-CTR key must be 128, 192, or 256 bits")),
++                }
++            };
++        }
++        match counter_length {
++            128 => by_key!(Ctr128BE),
++            64 => by_key!(Ctr64BE),
++            32 => by_key!(Ctr32BE),
++            _ => return Err(crypto_err("AES-CTR supports counter lengths of 32, 64, or 128 bits")),
++        }
++        Ok(buf)
++    })
+ }
+ 
+ /// PBKDF2 key derivation. `length` is the derived-bits output in bytes.
+@@ -1609,8 +1657,30 @@ fn op_subtle_pbkdf2(
+     #[buffer] salt: &[u8],
+     iterations: u32,
+     length: u32,
++) -> Result<Vec<u8>, deno_error::JsErrorBox> {
++    op_guard("op_subtle_pbkdf2", Err(crypto_err("op_subtle_pbkdf2 panicked")), || {
++        op_subtle_pbkdf2_inner(hash, password, salt, iterations, length)
++    })
++}
++
++fn op_subtle_pbkdf2_inner(
++    hash: &str,
++    password: &[u8],
++    salt: &[u8],
++    iterations: u32,
++    length: u32,
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+     use pbkdf2::pbkdf2_hmac;
++    if iterations > MAX_PBKDF2_ITERATIONS {
++        return Err(crypto_err(format!(
++            "PBKDF2 iterations ({iterations}) exceeds the maximum of {MAX_PBKDF2_ITERATIONS}"
++        )));
++    }
++    if length > MAX_DERIVE_BITS_LENGTH {
++        return Err(crypto_err(format!(
++            "PBKDF2 requested length ({length} bytes) exceeds the maximum of {MAX_DERIVE_BITS_LENGTH} bytes"
++        )));
++    }
+     let mut dk = vec![0u8; length as usize];
+     match hash {
+         "SHA-1" => pbkdf2_hmac::<sha1::Sha1>(password, salt, iterations, &mut dk),
+@@ -1633,8 +1703,25 @@ fn op_subtle_hkdf(
+     #[buffer] salt: &[u8],
+     #[buffer] info: &[u8],
+     length: u32,
++) -> Result<Vec<u8>, deno_error::JsErrorBox> {
++    op_guard("op_subtle_hkdf", Err(crypto_err("op_subtle_hkdf panicked")), || {
++        op_subtle_hkdf_inner(hash, ikm, salt, info, length)
++    })
++}
++
++fn op_subtle_hkdf_inner(
++    hash: &str,
++    ikm: &[u8],
++    salt: &[u8],
++    info: &[u8],
++    length: u32,
+ ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+     use hkdf::Hkdf;
++    if length > MAX_DERIVE_BITS_LENGTH {
++        return Err(crypto_err(format!(
++            "HKDF requested length ({length} bytes) exceeds the maximum of {MAX_DERIVE_BITS_LENGTH} bytes"
++        )));
++    }
+     let mut okm = vec![0u8; length as usize];
+     macro_rules! run {
+         ($d:ty) => {
+@@ -1660,9 +1747,11 @@ fn op_subtle_hkdf(
+ #[op2]
+ #[buffer]
+ fn op_random_bytes(len: u32) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+-    let mut buf = vec![0u8; len as usize];
+-    getrandom::getrandom(&mut buf).map_err(|e| crypto_err(format!("getrandom failed: {e}")))?;
+-    Ok(buf)
++    op_guard("op_random_bytes", Err(crypto_err("op_random_bytes panicked")), || {
++        let mut buf = vec![0u8; len as usize];
++        getrandom::getrandom(&mut buf).map_err(|e| crypto_err(format!("getrandom failed: {e}")))?;
++        Ok(buf)
++    })
+ }
+ 
+ /// Serialize a parsed URL into the WHATWG IDL component shape consumed by the
+@@ -1710,8 +1799,8 @@ fn url_components(u: &url::Url) -> serde_json::Value {
+ #[string]
+ fn op_url_parse(#[string] href: &str, #[string] base: &str) -> String {
+     // The url crate can panic on a few pathological inputs (internal range
+-    // slicing); catch it so a bad URL never aborts the process.
+-    std::panic::catch_unwind(|| {
++    // slicing); op_guard catches it so a bad URL never aborts the process.
++    op_guard("op_url_parse", "{\"ok\":false}".to_string(), || {
+         let parsed = if base.is_empty() {
+             url::Url::parse(href)
+         } else {
+@@ -1722,7 +1811,6 @@ fn op_url_parse(#[string] href: &str, #[string] base: &str) -> String {
+             Err(_) => "{\"ok\":false}".to_string(),
+         }
+     })
+-    .unwrap_or_else(|_| "{\"ok\":false}".to_string())
+ }
+ 
+ /// Apply a WHATWG URL setter (`part` = href/protocol/username/password/host/
+@@ -1774,11 +1862,12 @@ fn url_set_inner(href: &str, part: &str, value: &str) -> Option<serde_json::Valu
+ #[string]
+ fn op_url_set(#[string] href: &str, #[string] part: &str, #[string] value: &str) -> String {
+     // Some url-crate setters panic on pathological inputs (the url-setters WPT
+-    // tests exercise these). Catch the unwind and treat it as a no-op setter,
+-    // returning the URL unchanged, which matches WHATWG "do nothing on invalid".
+-    match std::panic::catch_unwind(|| url_set_inner(href, part, value)) {
+-        Ok(Some(v)) => v.to_string(),
+-        _ => match url::Url::parse(href) {
++    // tests exercise these). op_guard catches it and treats it as a no-op
++    // setter, returning the URL unchanged, matching WHATWG "do nothing on
++    // invalid".
++    match op_guard("op_url_set", None, || url_set_inner(href, part, value)) {
++        Some(v) => v.to_string(),
++        None => match url::Url::parse(href) {
+             Ok(u) => url_components(&u).to_string(),
+             Err(_) => "{\"ok\":false}".to_string(),
+         },
+@@ -1826,7 +1915,7 @@ fn set_host_port(u: &mut url::Url, value: &str) {
+ #[op2]
+ #[string]
+ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
+-    std::panic::catch_unwind(|| {
++    op_guard("op_url_resolve", String::new(), || {
+         let parsed = if base.is_empty() {
+             url::Url::parse(href)
+         } else {
+@@ -1834,7 +1923,6 @@ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
+         };
+         parsed.map(|u| u.as_str().to_string()).unwrap_or_default()
+     })
+-    .unwrap_or_default()
+ }
+ 
+ /// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
+@@ -1842,7 +1930,9 @@ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
+ #[op2]
+ #[string]
+ fn op_encoding_for_label(#[string] label: &str) -> String {
+-    obscura_net::label_name(label).unwrap_or_default()
++    op_guard("op_encoding_for_label", String::new(), || {
++        obscura_net::label_name(label).unwrap_or_default()
++    })
+ }
+ 
+ /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
+@@ -1851,10 +1941,12 @@ fn op_encoding_for_label(#[string] label: &str) -> String {
+ #[op2]
+ #[string]
+ fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
+-    match obscura_net::decode_with_label(label, bytes, fatal, ignore_bom) {
+-        Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
+-        None => "{\"ok\":false}".to_string(),
+-    }
++    op_guard("op_text_decode", "{\"ok\":false}".to_string(), || {
++        match obscura_net::decode_with_label(label, bytes, fatal, ignore_bom) {
++            Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
++            None => "{\"ok\":false}".to_string(),
++        }
++    })
+ }
+ 
+ /// Re-encode a URL query component using a non-UTF-8 document encoding override
+@@ -1866,7 +1958,10 @@ fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ig
+ #[op2]
+ #[string]
+ fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bool) -> String {
+-    obscura_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
++    let fallback = query.to_string();
++    op_guard("op_url_encode_query", fallback, || {
++        obscura_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
++    })
+ }
+ 
+ pub fn build_extension() -> Extension {
+@@ -1899,3 +1994,131 @@ pub fn build_extension() -> Extension {
+         ..Default::default()
+     }
+ }
++
++#[cfg(test)]
++mod op_safety_tests {
++    use super::*;
++
++    // Self-referential: lets the lint below scan this file's own source text.
++    const SRC: &str = include_str!("ops.rs");
++
++    // #[op2(async)] ops aren't run synchronously inside the V8 FFI call that
++    // dispatches them (only the initial poll is), so they don't carry the
++    // same panic-into-abort risk `op_guard` exists to prevent, and
++    // `std::panic::catch_unwind` doesn't compose with `.await` anyway. See
++    // the comment on `op_fetch_url`.
++    const ASYNC_OPS_EXEMPT_FROM_GUARD: &[&str] = &["op_fetch_url", "op_sleep"];
++
++    /// Lint-time check standing in for a structural guarantee deno_core's
++    /// `#[op2]` macro doesn't give us directly: every registered op's body
++    /// must route through the shared `op_guard` panic boundary, not just the
++    /// ones an author remembered to guard. Scans this file's own source for
++    /// every `#[op2]`-annotated function and asserts its body calls
++    /// `op_guard(`, so a newly added (or edited) op that skips the wrapper
++    /// fails this test instead of silently shipping an abort primitive.
++    #[test]
++    fn every_sync_op_is_panic_guarded() {
++        let lines: Vec<&str> = SRC.lines().collect();
++        let mut op_count = 0;
++        let mut i = 0;
++        while i < lines.len() {
++            if !lines[i].trim_start().starts_with("#[op2") {
++                i += 1;
++                continue;
++            }
++            let mut j = i + 1;
++            while j < lines.len() {
++                let t = lines[j].trim_start();
++                if t.starts_with("fn ") || t.starts_with("async fn ") {
++                    break;
++                }
++                j += 1;
++            }
++            assert!(j < lines.len(), "no fn found after #[op2] at ops.rs:{}", i + 1);
++
++            let name: String = lines[j]
++                .split("fn ")
++                .nth(1)
++                .unwrap_or("")
++                .chars()
++                .take_while(|c| c.is_alphanumeric() || *c == '_')
++                .collect();
++            assert!(!name.is_empty(), "could not extract op name at ops.rs:{}", j + 1);
++            op_count += 1;
++
++            if !ASYNC_OPS_EXEMPT_FROM_GUARD.contains(&name.as_str()) {
++                let window_end = (j + 15).min(lines.len());
++                let window = lines[j..window_end].join("\n");
++                assert!(
++                    window.contains("op_guard("),
++                    "op `{name}` (ops.rs:{}) does not route through op_guard() -- \
++                     every registered op must be panic-guarded",
++                    j + 1
++                );
++            }
++            i = j + 1;
++        }
++
++        // Bump this alongside build_extension()'s op list when adding a new
++        // op, as a forcing function to reconsider this test at the same time.
++        assert_eq!(op_count, 22, "op count changed -- update this test alongside build_extension()");
++    }
++
++    #[test]
++    fn op_guard_degrades_a_panic_to_the_fallback_instead_of_aborting() {
++        let result: Result<Vec<u8>, deno_error::JsErrorBox> = op_guard(
++            "test_panicking_op",
++            Err(crypto_err("test_panicking_op panicked")),
++            || panic!("simulated op panic"),
++        );
++        assert!(result.is_err(), "a panicking op must degrade to Err, not crash the process");
++    }
++
++    #[test]
++    fn pbkdf2_rejects_iterations_above_cap_without_running_them() {
++        let start = std::time::Instant::now();
++        let result = op_subtle_pbkdf2_inner("SHA-256", b"password", b"salt", u32::MAX, 32);
++        assert!(result.is_err());
++        assert!(
++            start.elapsed() < std::time::Duration::from_millis(500),
++            "iterations above the cap must be rejected before running, not after"
++        );
++    }
++
++    #[test]
++    fn pbkdf2_rejects_length_above_cap() {
++        let result = op_subtle_pbkdf2_inner(
++            "SHA-256",
++            b"password",
++            b"salt",
++            1,
++            MAX_DERIVE_BITS_LENGTH + 1,
++        );
++        assert!(result.is_err());
++    }
++
++    #[test]
++    fn pbkdf2_succeeds_at_or_below_caps() {
++        let result = op_subtle_pbkdf2_inner("SHA-256", b"password", b"salt", 1000, 32);
++        assert_eq!(result.unwrap().len(), 32);
++
++        // Exercise the length cap boundary directly (a low iteration count
++        // keeps this fast; MAX_PBKDF2_ITERATIONS itself is deliberately large
++        // and not something a unit test should run to completion).
++        let result =
++            op_subtle_pbkdf2_inner("SHA-256", b"password", b"salt", 1, MAX_DERIVE_BITS_LENGTH);
++        assert_eq!(result.unwrap().len(), MAX_DERIVE_BITS_LENGTH as usize);
++    }
++
++    #[test]
++    fn hkdf_rejects_length_above_cap() {
++        let result = op_subtle_hkdf_inner("SHA-256", b"ikm", b"salt", b"info", MAX_DERIVE_BITS_LENGTH + 1);
++        assert!(result.is_err());
++    }
++
++    #[test]
++    fn hkdf_succeeds_at_or_below_cap() {
++        let result = op_subtle_hkdf_inner("SHA-256", b"ikm", b"salt", b"info", 32);
++        assert_eq!(result.unwrap().len(), 32);
++    }
++}
