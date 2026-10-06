@@ -15,8 +15,9 @@ Each top-level directory (e.g. `obscura/`, `postgresparser/`,
 `md2confluence-mcp/`) is one tracked fork, containing:
 
 - `upstream.txt` — the URL of the upstream repo being tracked.
-- `fork.txt` — the URL of *our* fork remote (what the scripts push to/pull
-  from).
+- `fork.txt` — the SSH URL of *our* fork remote (what the scripts push
+  to/pull from), e.g. `git@github.com:earlye-forks/turso.git`. SSH, because
+  the scripts push and HTTPS needs a credential helper they don't set up.
 - `prompts/feature-NNN.md` — numbered, self-contained fix prompts, applied in
   filename order.
 - `patches/feature-NNN.patch` and `patches/feature-NNN.base` — written by the
