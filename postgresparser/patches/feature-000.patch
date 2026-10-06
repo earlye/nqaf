@@ -1,0 +1,562 @@
+From 4c039a6ff4e146251c3e72108103373fa7a7c1ef Mon Sep 17 00:00:00 2001
+From: "Early Ehlinger [cerby]" <earlye@gmail.com>
+Date: Tue, 6 Oct 2026 02:31:06 +0000
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md                    | 11 +++++++++++
+ README.md                                       | 13 +++++++++++--
+ analysis/analysis.go                            |  2 +-
+ analysis/analysis_ddl_test.go                   |  2 +-
+ analysis/analysis_multi_statement_table_test.go |  2 +-
+ analysis/combined_extractor.go                  |  2 +-
+ analysis/fixes_test.go                          |  2 +-
+ analysis/helpers.go                             |  2 +-
+ analysis/helpers_test.go                        |  2 +-
+ analysis/join_parser.go                         |  4 ++--
+ analysis/join_parser_test.go                    |  2 +-
+ analysis/where_conditions.go                    |  4 ++--
+ analysis/where_conditions_test.go               |  2 +-
+ antlr_stderr_test.go                            |  2 +-
+ benchmark/bench_test.go                         |  4 ++--
+ benchmark/go.mod                                |  8 ++++----
+ benchmark/go.sum                                |  8 ++++++++
+ ddl.go                                          |  4 ++--
+ ddl_comment.go                                  |  2 +-
+ dml_common.go                                   |  2 +-
+ dml_delete.go                                   |  2 +-
+ dml_insert.go                                   |  2 +-
+ dml_update.go                                   |  2 +-
+ entry.go                                        |  2 +-
+ examples/analysis/main.go                       |  2 +-
+ examples/basic/main.go                          |  2 +-
+ examples/ddl/main.go                            |  2 +-
+ examples/multi_statement/main.go                |  2 +-
+ examples/sll_mode/main.go                       |  2 +-
+ go.mod                                          |  2 +-
+ helpers.go                                      |  4 ++--
+ helpers_comparison.go                           |  2 +-
+ merge.go                                        |  2 +-
+ select.go                                       |  2 +-
+ setops.go                                       |  2 +-
+ 35 files changed, 70 insertions(+), 42 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-000.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 0000000..1ea4d1a
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,11 @@
++Please update all go.mod and *.go files so the packages will reflect
++the fork repo location from fork.txt rather than the upstream repo
++location so that pkg.go.dev will let users see only this version.
++
++Run `go mod tidy` to regenerate all go.sum files.
++
++Update the README.md with a statement explaining that this repo is a
++fork of the upstream repo (with link) that contains fixes other
++issues, with a list of other prompts in ../prompts/.
++
++Do not make other changes.
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 8313431..082efb2 100644
+--- a/README.md
++++ b/README.md
+@@ -1,7 +1,9 @@
+ # postgresparser
+ 
++> **This is a fork of [github.com/valkdb/postgresparser](https://github.com/valkdb/postgresparser) that contains additional fixes and features applied via AI-assisted prompts. See [Prompts / Fixes](#prompts--fixes) below for details.**
++
+ [![CI](https://github.com/valkdb/postgresparser/actions/workflows/ci.yml/badge.svg)](https://github.com/valkdb/postgresparser/actions/workflows/ci.yml)
+-[![Go Reference](https://pkg.go.dev/badge/github.com/valkdb/postgresparser.svg)](https://pkg.go.dev/github.com/valkdb/postgresparser)
++[![Go Reference](https://pkg.go.dev/badge/github.com/earlye/postgresparser.svg)](https://pkg.go.dev/github.com/earlye/postgresparser)
+ [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+ 
+ A pure-Go PostgreSQL parser. No cgo, no C toolchain — just `go build`.
+@@ -55,7 +57,7 @@ fmt.Println(batch.Statements[1].Query.DDLActions[0].ObjectName) // "sometable"
+ ## Installation
+ 
+ ```bash
+-go get github.com/valkdb/postgresparser
++go get github.com/earlye/postgresparser
+ ```
+ 
+ ## What you can build with it
+@@ -207,6 +209,13 @@ This is an ANTLR4-based grammar, not PostgreSQL's internal server parser. Some e
+ 
+ `ParseSQL` processes the first SQL statement for backward compatibility. For multi-statement input, use `ParseSQLAll`; to enforce exactly one statement, use `ParseSQLStrict`.
+ 
++## Prompts / Fixes
++
++The following AI-assisted prompts were applied to this fork on top of the upstream repo:
++
++- [feature-000.md](../prompts/feature-000.md) — Update module path to fork location so pkg.go.dev indexes this version
++- [feature-001.md](../prompts/feature-001.md) — Fix: JSONB operators `?`, `?|`, `?&` not valid in CHECK constraint expressions
++
+ ## License
+ 
+ Apache License 2.0 — see [LICENSE](LICENSE) for details.
+diff --git a/analysis/analysis.go b/analysis/analysis.go
+index da5b4b6..922adee 100644
+--- a/analysis/analysis.go
++++ b/analysis/analysis.go
+@@ -6,7 +6,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // AnalyzeSQL parses and analyzes only the first SQL statement in the input.
+diff --git a/analysis/analysis_ddl_test.go b/analysis/analysis_ddl_test.go
+index 389f6c0..c7ddd96 100644
+--- a/analysis/analysis_ddl_test.go
++++ b/analysis/analysis_ddl_test.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // TestAnalyzeSQL_DDL_DropTable validates DROP TABLE metadata including IF EXISTS, CASCADE, and multi-table.
+diff --git a/analysis/analysis_multi_statement_table_test.go b/analysis/analysis_multi_statement_table_test.go
+index f2c5ce2..67807e1 100644
+--- a/analysis/analysis_multi_statement_table_test.go
++++ b/analysis/analysis_multi_statement_table_test.go
+@@ -7,7 +7,7 @@ import (
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ const multiCreateTableSQLAnalysis = `
+diff --git a/analysis/combined_extractor.go b/analysis/combined_extractor.go
+index baf0023..995e830 100644
+--- a/analysis/combined_extractor.go
++++ b/analysis/combined_extractor.go
+@@ -6,7 +6,7 @@ package analysis
+ import (
+ 	"fmt"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // QueryAnalysisResult holds the combined results of query analysis.
+diff --git a/analysis/fixes_test.go b/analysis/fixes_test.go
+index 23a8ef5..049a2c1 100644
+--- a/analysis/fixes_test.go
++++ b/analysis/fixes_test.go
+@@ -13,7 +13,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // =============================================================================
+diff --git a/analysis/helpers.go b/analysis/helpers.go
+index 8076141..953f803 100644
+--- a/analysis/helpers.go
++++ b/analysis/helpers.go
+@@ -5,7 +5,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
+-	"github.com/valkdb/postgresparser/internal/ident"
++	"github.com/earlye/postgresparser/internal/ident"
+ )
+ 
+ // BaseTables returns unique base relations referenced by the query.
+diff --git a/analysis/helpers_test.go b/analysis/helpers_test.go
+index 9fd5071..647edb1 100644
+--- a/analysis/helpers_test.go
++++ b/analysis/helpers_test.go
+@@ -4,7 +4,7 @@ import (
+ 	"strings"
+ 	"testing"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // TestColumnsForTableUsesColumnUsage validates ColumnsForTable filters by alias and usage types.
+diff --git a/analysis/join_parser.go b/analysis/join_parser.go
+index 99b5e57..0b87c6e 100644
+--- a/analysis/join_parser.go
++++ b/analysis/join_parser.go
+@@ -12,8 +12,8 @@ import (
+ 	"regexp"
+ 	"strings"
+ 
+-	"github.com/valkdb/postgresparser"
+-	"github.com/valkdb/postgresparser/internal/ident"
++	"github.com/earlye/postgresparser"
++	"github.com/earlye/postgresparser/internal/ident"
+ )
+ 
+ // equalityPattern matches equality conditions like "alias.column = alias.column" in JOIN ON clauses.
+diff --git a/analysis/join_parser_test.go b/analysis/join_parser_test.go
+index d6c9c4d..c76d980 100644
+--- a/analysis/join_parser_test.go
++++ b/analysis/join_parser_test.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // TestDeduplicateRelationships validates removal of duplicate join relationships.
+diff --git a/analysis/where_conditions.go b/analysis/where_conditions.go
+index 9696b07..f0710b4 100644
+--- a/analysis/where_conditions.go
++++ b/analysis/where_conditions.go
+@@ -7,8 +7,8 @@ import (
+ 	"regexp"
+ 	"strings"
+ 
+-	"github.com/valkdb/postgresparser"
+-	"github.com/valkdb/postgresparser/internal/ident"
++	"github.com/earlye/postgresparser"
++	"github.com/earlye/postgresparser/internal/ident"
+ )
+ 
+ var parameterRegex = regexp.MustCompile(`^\$\d+$|^\?$`)
+diff --git a/analysis/where_conditions_test.go b/analysis/where_conditions_test.go
+index bc2fa8a..b9dd3a8 100644
+--- a/analysis/where_conditions_test.go
++++ b/analysis/where_conditions_test.go
+@@ -8,7 +8,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ // =============================================================================
+diff --git a/antlr_stderr_test.go b/antlr_stderr_test.go
+index 3e32d2d..bb319aa 100644
+--- a/antlr_stderr_test.go
++++ b/antlr_stderr_test.go
+@@ -10,7 +10,7 @@ import (
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ var stderrCaptureMu sync.Mutex
+diff --git a/benchmark/bench_test.go b/benchmark/bench_test.go
+index acd2174..6c8fd47 100644
+--- a/benchmark/bench_test.go
++++ b/benchmark/bench_test.go
+@@ -5,8 +5,8 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 	pgquery "github.com/pganalyze/pg_query_go/v6"
+-	"github.com/valkdb/postgresparser"
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // queries covers a range of SQL complexity levels.
+diff --git a/benchmark/go.mod b/benchmark/go.mod
+index 3e73c48..6260215 100644
+--- a/benchmark/go.mod
++++ b/benchmark/go.mod
+@@ -1,16 +1,16 @@
+-module github.com/valkdb/postgresparser/benchmark
++module github.com/earlye/postgresparser/benchmark
+ 
+ go 1.25.6
+ 
+ require (
++	github.com/antlr4-go/antlr/v4 v4.13.1
++	github.com/earlye/postgresparser v0.0.0
+ 	github.com/pganalyze/pg_query_go/v6 v6.0.0
+-	github.com/valkdb/postgresparser v0.0.0
+ )
+ 
+ require (
+-	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+ 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+ 	google.golang.org/protobuf v1.31.0 // indirect
+ )
+ 
+-replace github.com/valkdb/postgresparser => ..
++replace github.com/earlye/postgresparser => ..
+diff --git a/benchmark/go.sum b/benchmark/go.sum
+index 7763c31..32c3a44 100644
+--- a/benchmark/go.sum
++++ b/benchmark/go.sum
+@@ -1,14 +1,22 @@
+ github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
+ github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
+ github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+ github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+ github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+ github.com/pganalyze/pg_query_go/v6 v6.0.0 h1:in6RkR/apfqlAtvqgDxd4Y4o87a5Pr8fkKDB4DrDo2c=
+ github.com/pganalyze/pg_query_go/v6 v6.0.0/go.mod h1:nvTHIuoud6e1SfrUaFwHqT0i4b5Nr+1rPWVds3B5+50=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
++github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+ golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 h1:vr/HnozRka3pE4EsMEg1lgkXJkTFJCVUX+S/ZT6wYzM=
+ golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842/go.mod h1:XtvwrStGgqGPLc4cjQfWqZHG1YFdYs6swckp8vpsjnc=
+ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
+ google.golang.org/protobuf v1.31.0 h1:g0LDEJHgrBl9N9r17Ru3sqWhkIx2NB67okBHPwC7hs8=
+ google.golang.org/protobuf v1.31.0/go.mod h1:HV8QOd/L58Z+nl8r43ehVNZIU/HEI6OcFqwMG9pJV4I=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/ddl.go b/ddl.go
+index 941a756..a1c1125 100644
+--- a/ddl.go
++++ b/ddl.go
+@@ -7,8 +7,8 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
+-	"github.com/valkdb/postgresparser/internal/ident"
++	"github.com/earlye/postgresparser/gen"
++	"github.com/earlye/postgresparser/internal/ident"
+ )
+ 
+ // populateCreateTable handles CREATE TABLE metadata extraction (table + columns)
+diff --git a/ddl_comment.go b/ddl_comment.go
+index 9d628d3..fbb154c 100644
+--- a/ddl_comment.go
++++ b/ddl_comment.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateCommentStmt handles COMMENT ON metadata extraction.
+diff --git a/dml_common.go b/dml_common.go
+index 22bdf93..7853463 100644
+--- a/dml_common.go
++++ b/dml_common.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // extractInsertColumns converts an insert_column_list into raw column names.
+diff --git a/dml_delete.go b/dml_delete.go
+index a5cbba2..e6cbe3c 100644
+--- a/dml_delete.go
++++ b/dml_delete.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateDelete captures DELETE targets, USING tables, predicates, and returning data.
+diff --git a/dml_insert.go b/dml_insert.go
+index 79da6cb..22a2402 100644
+--- a/dml_insert.go
++++ b/dml_insert.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateInsert records INSERT target tables, columns, and upsert metadata.
+diff --git a/dml_update.go b/dml_update.go
+index 556105a..f9243ea 100644
+--- a/dml_update.go
++++ b/dml_update.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateUpdate records UPDATE targets, SET clauses, joins, and returning data.
+diff --git a/entry.go b/entry.go
+index a43fed8..b4206fa 100644
+--- a/entry.go
++++ b/entry.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // ParseSQL parses only the first SQL statement in the input string.
+diff --git a/examples/analysis/main.go b/examples/analysis/main.go
+index c18d2c3..3bd8a12 100644
+--- a/examples/analysis/main.go
++++ b/examples/analysis/main.go
+@@ -5,7 +5,7 @@ import (
+ 	"fmt"
+ 	"log"
+ 
+-	"github.com/valkdb/postgresparser/analysis"
++	"github.com/earlye/postgresparser/analysis"
+ )
+ 
+ func main() {
+diff --git a/examples/basic/main.go b/examples/basic/main.go
+index 06b7b72..399b592 100644
+--- a/examples/basic/main.go
++++ b/examples/basic/main.go
+@@ -5,7 +5,7 @@ import (
+ 	"fmt"
+ 	"log"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ func main() {
+diff --git a/examples/ddl/main.go b/examples/ddl/main.go
+index d09d55e..bc31a80 100644
+--- a/examples/ddl/main.go
++++ b/examples/ddl/main.go
+@@ -5,7 +5,7 @@ import (
+ 	"fmt"
+ 	"log"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ func main() {
+diff --git a/examples/multi_statement/main.go b/examples/multi_statement/main.go
+index a68ec70..3ea3dd0 100644
+--- a/examples/multi_statement/main.go
++++ b/examples/multi_statement/main.go
+@@ -5,7 +5,7 @@ import (
+ 	"log"
+ 	"strings"
+ 
+-	"github.com/valkdb/postgresparser"
++	"github.com/earlye/postgresparser"
+ )
+ 
+ func main() {
+diff --git a/examples/sll_mode/main.go b/examples/sll_mode/main.go
+index 9e2a396..39c70f6 100644
+--- a/examples/sll_mode/main.go
++++ b/examples/sll_mode/main.go
+@@ -19,7 +19,7 @@ import (
+ 	"log"
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ func main() {
+diff --git a/go.mod b/go.mod
+index 8ae6bfc..56fe2c9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,4 +1,4 @@
+-module github.com/valkdb/postgresparser
++module github.com/earlye/postgresparser
+ 
+ go 1.25.6
+ 
+diff --git a/helpers.go b/helpers.go
+index a95dd4b..b1b961c 100644
+--- a/helpers.go
++++ b/helpers.go
+@@ -7,8 +7,8 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
+-	"github.com/valkdb/postgresparser/internal/ident"
++	"github.com/earlye/postgresparser/gen"
++	"github.com/earlye/postgresparser/internal/ident"
+ )
+ 
+ // columnRef is an internal representation of a column reference.
+diff --git a/helpers_comparison.go b/helpers_comparison.go
+index 438542d..2d707fd 100644
+--- a/helpers_comparison.go
++++ b/helpers_comparison.go
+@@ -7,7 +7,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // comparisonInfo holds information about a single comparison expression.
+diff --git a/merge.go b/merge.go
+index ef4c99e..6b38fa6 100644
+--- a/merge.go
++++ b/merge.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateMerge builds MergeClause metadata for target, source, and action clauses.
+diff --git a/select.go b/select.go
+index 6cec745..11d8612 100644
+--- a/select.go
++++ b/select.go
+@@ -8,7 +8,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // populateSelect builds SELECT metadata from the given ANTLR context.
+diff --git a/setops.go b/setops.go
+index 1ecfc8c..a3fb850 100644
+--- a/setops.go
++++ b/setops.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+ 
+-	"github.com/valkdb/postgresparser/gen"
++	"github.com/earlye/postgresparser/gen"
+ )
+ 
+ // extractSetOperationsWithResult traverses UNION/INTERSECT/EXCEPT chains with optional result for column usage recording.

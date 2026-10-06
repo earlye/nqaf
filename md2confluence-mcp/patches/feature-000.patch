@@ -1,0 +1,113 @@
+From f275d76e18612c93a2438dd807236aee34dcc84c Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 15:42:26 -0500
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .npmignore                   |  2 ++
+ .nqaf/prompts/feature-000.md | 37 ++++++++++++++++++++++++++++++++++++
+ package.json                 |  1 +
+ src/converter.test.ts        | 28 +++++++++++++++++++++++++++
+ 4 files changed, 68 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+ create mode 100644 src/converter.test.ts
+
+diff --git a/.npmignore b/.npmignore
+index 6bcd6ab..ee0f5b1 100644
+--- a/.npmignore
++++ b/.npmignore
+@@ -1,3 +1,5 @@
+ src/
+ tsconfig.json
+ .gitignore
++dist/**/*.test.js
++dist/**/*.test.d.ts
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 0000000..7722700
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,37 @@
++# [feature-000.md]
++# Feature: add an automated test harness
++
++## Problem
++
++This repo has no test framework and no `test` script — `package.json`
++(`scripts`) only has `build`, `start`, `dev`, `prepublishOnly`. A later prompt
++(`feature-001.md`) needs to add real integration tests, so the harness needs
++to exist first.
++
++## Fix
++
++Use Node's built-in test runner (`node:test`) — no new dependencies. Node 18+
++is already the `engines` minimum in `package.json`.
++
++- Add a `"test"` script to `package.json`: `"test": "npm run build && node --test dist"`.
++  `node --test` given a directory recursively discovers compiled `*.test.js`
++  files under it, so no glob is needed.
++- Test files live at `src/**/*.test.ts`, next to the code they test. Do not
++  create a separate `tsconfig.test.json` — the existing `tsconfig.json`
++  already includes `src/**/*`, so `.test.ts` files compile into `dist/`
++  alongside application code automatically.
++- `.npmignore` currently excludes `src/`, `tsconfig.json`, and `.gitignore`
++  from what gets published to npm, but nothing excludes compiled test output
++  from `dist/`. Add `dist/**/*.test.js` and `dist/**/*.test.d.ts` to
++  `.npmignore` so test files never ship in the published package.
++- Add exactly one smoke test to prove the harness works end-to-end (build →
++  discovery → run → npmignore exclusion): a new `src/converter.test.ts` that
++  imports `extractTitle` and/or `removeFrontMatter` from `./converter.js`
++  (both already exported, both pure, no I/O) and asserts on a couple of known
++  inputs/outputs.
++
++## Do not make other changes
++
++Do not touch `CONFLUENCE_TOKEN`/`pass` handling, Mermaid rendering, or the
++README's Installation section — those are `feature-001.md`. This prompt only
++wires up the test harness and proves it runs.
+diff --git a/package.json b/package.json
+index 859b3bf..de37959 100644
+--- a/package.json
++++ b/package.json
+@@ -11,6 +11,7 @@
+     "build": "tsc",
+     "start": "node dist/index.js",
+     "dev": "ts-node src/index.ts",
++    "test": "npm run build && cd dist && node --test",
+     "prepublishOnly": "npm run build"
+   },
+   "keywords": [
+diff --git a/src/converter.test.ts b/src/converter.test.ts
+new file mode 100644
+index 0000000..c173914
+--- /dev/null
++++ b/src/converter.test.ts
+@@ -0,0 +1,28 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { extractTitle, removeFrontMatter } from "./converter.js";
++
++test("removeFrontMatter strips YAML front matter", () => {
++  const markdown = "---\ntitle: Hello\n---\n# Hello\n\nBody text";
++  assert.equal(removeFrontMatter(markdown), "# Hello\n\nBody text");
++});
++
++test("removeFrontMatter leaves markdown without front matter unchanged", () => {
++  const markdown = "# Hello\n\nBody text";
++  assert.equal(removeFrontMatter(markdown), markdown);
++});
++
++test("extractTitle reads title from front matter", () => {
++  const markdown = '---\ntitle: "My Title"\n---\n# Other Heading';
++  assert.equal(extractTitle(markdown), "My Title");
++});
++
++test("extractTitle falls back to first H1 when no front matter title", () => {
++  const markdown = "# My Heading\n\nBody text";
++  assert.equal(extractTitle(markdown), "My Heading");
++});
++
++test("extractTitle falls back to provided default when nothing found", () => {
++  const markdown = "Body text with no heading";
++  assert.equal(extractTitle(markdown, "Fallback"), "Fallback");
++});

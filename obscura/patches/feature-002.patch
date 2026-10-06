@@ -1,0 +1,170 @@
+From 349f0ead714467a65079b501d4c981d8947713e4 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 13:07:40 -0500
+Subject: [PATCH] Apply feature-002.md
+
+---
+ .nqaf/prompts/feature-002.md           | 59 ++++++++++++++++++++++++
+ crates/obscura-js/src/module_loader.rs | 64 ++++++++++++++++++++++++++
+ crates/obscura-js/src/ops.rs           |  2 +-
+ 3 files changed, 124 insertions(+), 1 deletion(-)
+ create mode 100644 .nqaf/prompts/feature-002.md
+
+diff --git a/.nqaf/prompts/feature-002.md b/.nqaf/prompts/feature-002.md
+new file mode 100644
+index 0000000..ee94115
+--- /dev/null
++++ b/.nqaf/prompts/feature-002.md
+@@ -0,0 +1,59 @@
++# Fix: SSRF bypass via ES module dynamic `import()` / `<script type=module>`
++
++## Problem [feature-002]
++
++`obscura-net` protects against SSRF (a page reaching loopback/RFC1918/link-local/
++cloud-metadata addresses) via a custom DNS resolver (something like
++`SsrfGuardResolver`) plugged into the HTTP client, plus a literal-host check
++(`validate_url`/`validate_fetch_url`) that runs before the request is sent. This
++works correctly for ordinary navigation and for `fetch()`/XHR initiated from page
++JavaScript.
++
++It does **not** work for ES module loading. The module loader (in `obscura-js`,
++the code that implements dynamic `import()` and `<script type="module">`) builds
++its own HTTP client and fetches the module source directly, with no call to
++`validate_fetch_url`/`validate_url`/an IP-forbidden-range check anywhere in that
++file. Its only protection is the DNS-resolver-level guard on the underlying HTTP
++client — and the HTTP client library in use skips the custom DNS resolver
++entirely whenever the target host is already a literal IP address (this is
++documented/expected behavior of the underlying connector: if the host string
++parses as an IP, there's nothing to resolve, so the resolver is never invoked).
++
++Net effect: a page running
++`import('http://127.0.0.1:6379/').catch(()=>{})` or
++`<script type="module" src="http://169.254.169.254/latest/meta-data/iam/security-credentials/">`
++reaches loopback/link-local addresses directly, because (a) the module loader
++never checks the URL itself, and (b) the DNS-resolver-based guard it's implicitly
++relying on doesn't fire for literal IP hosts.
++
++## Fix
++
++Add an explicit URL validation call in the module loader, at the point where it
++is about to fetch a module's source, using the same validator function
++(`validate_url`/`validate_fetch_url` or whatever it has been refactored into) that
++already protects `fetch()`/XHR and navigation. This should not depend on the HTTP
++client's DNS resolver as the only line of defense — validate the URL explicitly,
++the same way the other two call sites do, so protection doesn't depend on
++happening to route through a resolver that gets bypassed for IP literals.
++
++Also verify: does the *DNS-resolver-based* guard on the shared HTTP client
++correctly handle a hostname that resolves to a forbidden address, given the
++resolver-skipped-for-IP-literals gap identified above? If the literal-IP
++bypass affects any other caller of that HTTP client (not just the module
++loader), fix it at the client-construction level too — e.g. by validating the
++literal-IP case explicitly before ever handing the URL to the client, rather
++than relying solely on the resolver hook.
++
++Add a regression test that attempts to dynamically import a module from a
++loopback/private-IP URL and asserts the import is rejected before any network
++request is made.
++
++## Why this matters
++
++This is a silent, complete bypass of the project's SSRF protection through a
++JS-reachable code path (dynamic `import()`) that most reviewers wouldn't think
++to check separately from `fetch()`/XHR, since it looks like "just another way
++to load a URL" but has its own, unguarded fetch implementation. A page can use
++it to reach internal services, cloud metadata endpoints, or anything else on
++the host's local network, with no special access beyond running JavaScript
++that the automation already executes as a matter of course.
+diff --git a/crates/obscura-js/src/module_loader.rs b/crates/obscura-js/src/module_loader.rs
+index 2619349..f9c461b 100644
+--- a/crates/obscura-js/src/module_loader.rs
++++ b/crates/obscura-js/src/module_loader.rs
+@@ -65,7 +65,18 @@ impl ModuleLoader for ObscuraModuleLoader {
+         // plain Option<String> rather than borrowing &self across an `await`.
+         let proxy_url = self.proxy_url.clone();
+ 
++        let specifier_for_check = module_specifier.clone();
++
+         ModuleLoadResponse::Async(Pin::from(Box::new(async move {
++            // The SsrfGuardResolver on the shared client only catches a
++            // hostname that DNS-rebinds to a forbidden address; it is never
++            // consulted when the host is already a literal IP (hyper-util's
++            // connector skips DNS resolution entirely in that case). So
++            // module fetches need the same string-level check op_fetch_url
++            // already applies before ever handing the URL to the client.
++            crate::ops::validate_fetch_url(&specifier_for_check)
++                .map_err(|e| io_err(format!("Module {} blocked: {}", url, e)))?;
++
+             // Reuse the process-wide cached client (same one op_fetch_url
+             // uses). Modern SPAs dynamic-import 20-50 chunks per page; the
+             // old code built a fresh reqwest::Client per import, each with
+@@ -113,3 +124,56 @@ impl ModuleLoader for ObscuraModuleLoader {
+         })))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    // Regression test for the SSRF bypass via dynamic `import()` /
++    // `<script type="module">`: the module loader used to fetch module
++    // source directly with no URL validation, relying solely on the shared
++    // client's SsrfGuardResolver — which never fires for a literal IP host
++    // (hyper-util skips DNS resolution entirely when the host already parses
++    // as an IP). `load()` must reject loopback/link-local URLs itself,
++    // before any request is attempted.
++    async fn assert_blocked(url: &str) {
++        let loader = ObscuraModuleLoader::new("https://example.com/");
++        let specifier = ModuleSpecifier::parse(url).unwrap();
++        let response = loader.load(
++            &specifier,
++            None,
++            true,
++            RequestedModuleType::None,
++        );
++        let ModuleLoadResponse::Async(fut) = response else {
++            panic!("expected an async module load response");
++        };
++        let result = fut.await;
++        let err = result.expect_err(&format!(
++            "module import of {} must be rejected as SSRF, not fetched",
++            url
++        ));
++        let msg = err.to_string();
++        assert!(
++            msg.contains("blocked") || msg.contains("not allowed"),
++            "expected an SSRF-validation error for {}, got: {}",
++            url,
++            msg
++        );
++    }
++
++    #[tokio::test]
++    async fn dynamic_import_from_loopback_is_blocked() {
++        assert_blocked("http://127.0.0.1:6379/").await;
++    }
++
++    #[tokio::test]
++    async fn dynamic_import_from_link_local_metadata_is_blocked() {
++        assert_blocked("http://169.254.169.254/latest/meta-data/iam/security-credentials/").await;
++    }
++
++    #[tokio::test]
++    async fn dynamic_import_from_ipv6_loopback_is_blocked() {
++        assert_blocked("http://[::1]:6379/").await;
++    }
++}
+diff --git a/crates/obscura-js/src/ops.rs b/crates/obscura-js/src/ops.rs
+index c578ac8..ce60b78 100644
+--- a/crates/obscura-js/src/ops.rs
++++ b/crates/obscura-js/src/ops.rs
+@@ -1306,7 +1306,7 @@ mod tests {
+     }
+ }
+ 
+-fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
++pub(crate) fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
+     let scheme = url.scheme();
+     if scheme != "http" && scheme != "https" && scheme != "file" {
+         return Err(format!(
