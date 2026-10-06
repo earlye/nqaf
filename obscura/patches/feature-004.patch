@@ -1,0 +1,424 @@
+From a40d27846b1e4f810b0e43964a5a294563387236 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 13:20:30 -0500
+Subject: [PATCH] Apply feature-004.md
+
+---
+ .nqaf/prompts/feature-004.md        | 116 ++++++++++++++++++++++++++++
+ crates/obscura-dom/src/tree_sink.rs |  32 ++++----
+ crates/obscura/examples/basic.rs    |   4 +-
+ crates/obscura/src/browser.rs       |   4 +-
+ crates/obscura/src/error.rs         |   3 +
+ crates/obscura/src/page.rs          |  55 +++++++------
+ 6 files changed, 168 insertions(+), 46 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-004.md
+
+diff --git a/.nqaf/prompts/feature-004.md b/.nqaf/prompts/feature-004.md
+new file mode 100644
+index 0000000..0f42a05
+--- /dev/null
++++ b/.nqaf/prompts/feature-004.md
+@@ -0,0 +1,116 @@
++# Fix: remove unsound raw-pointer `unsafe` blocks in `Element` and `ObscuraElemName`
++
++## Problem [feature-004]
++
++Two structs in this codebase hold raw pointers with no lifetime or ownership
++tie to what they point at, and dereference them via `unsafe` with no `SAFETY`
++justification:
++
++**1. `obscura::Element`** (in the public embedding crate, `obscura`'s page
++module). It's defined roughly as:
++
++```rust
++pub struct Element {
++    node_id: u64,
++    page: *const Page,
++}
++```
++
++created as `Element { node_id: nid, page: self as *const Page }` from a
++`&mut Page`, with no lifetime tying the pointer to the `Page` it came from.
++Every accessor (`text()`, `attribute()`, `click()`) does
++`unsafe { &mut *(self.page as *mut Page) }` to get mutable access back to the
++`Page` so it can call `evaluate()`. Concretely, this means:
++
++- If the originating `Page` is moved (returned from a function, pushed into a
++  `Vec`, etc.) or dropped, any `Element` created from it holds a dangling
++  pointer, and calling any of its methods is a use-after-free / dereference of
++  an invalid address.
++- Independent of any move: since these methods cast to `&mut Page` while the
++  caller can simultaneously hold the original `Page` (owned or `&mut`), it's
++  possible to have two live mutable references to the same object at once,
++  which is undefined behavior under Rust's aliasing rules even without an
++  actual use-after-free.
++
++**2. `obscura-dom`'s `ObscuraElemName`** (in the `tree_sink` module, implementing
++html5ever's `TreeSink::ElemName` for the DOM arena). It holds a raw
++`*const QualName` pointer into the arena, obtained by borrowing the arena via
++`RefCell::borrow()` and then discarding the actual `Ref` guard in favor of a
++type-erased `Ref<'a, ()>` (via `Ref::map(borrow, |_| &())`) that exists only to
++keep the `RefCell`'s runtime borrow-count incremented. This means a concurrent
++mutating borrow of the arena elsewhere would panic rather than alias — but
++nothing statically ties the raw pointer's validity to that guard, and all
++three of its accessor methods dereference it via bare `unsafe` with no
++`SAFETY` comment.
++
++## Fix
++
++**For `Element`:** restructure it to hold a `Weak` reference instead of a raw
++pointer, rather than either of the two alternatives below (both were
++considered and rejected for this codebase — see rationale):
++
++- *Rejected: lifetime-bound borrow* (`Element<'a> { page: &'a mut Page }`,
++  `text`/`attribute`/`click` taking `&mut self`). This removes the unsafe
++  block but forces every caller to drop all `Element`s derived from a `Page`
++  before calling any other method on that `Page` (e.g. `goto()`) — a real
++  ergonomic cost, enforced by the borrow checker rather than something callers
++  can work around.
++- *Rejected: generational handle* (`Element { node_id, epoch: u64 }`, `Page`
++  tracking a bumped `epoch`, checked on each access). This removes the
++  lifetime constraint, but a per-`Page` epoch that starts fresh isn't unique
++  across different `Page` instances — two different `Page`s can land on the
++  same epoch value, and an `Element` from one could be (incorrectly) accepted
++  by the other. Avoiding that needs either a composite `(page_id, epoch)` key
++  or a single globally-issued counter shared across all pages and all
++  navigations — more moving parts than the `Weak` approach below for the same
++  guarantee.
++- **Use instead:** change `Page`'s internal state to be held behind
++  `Rc<RefCell<InnerPage>>` (verify first whether `Rc` or `Arc` is
++  appropriate — see verification note below), and give `Element` a
++  `page: Weak<RefCell<InnerPage>>` (via `Rc::downgrade`). Accessor methods
++  become: `self.page.upgrade().ok_or(Error::PageDropped)?`, then
++  `.borrow_mut()` to get mutable access, then call the underlying `evaluate`
++  or equivalent. This removes the `unsafe` block entirely — `Weak::upgrade()`
++  returns `None` once the `Page` is dropped instead of ever dereferencing a
++  stale address, and because a `Weak` is tied to one specific `Rc` allocation
++  rather than a numeric id, an `Element` from one `Page` can never be confused
++  with or accepted by a different `Page` — there's no id to collide, so the
++  generational-handle collision problem doesn't apply here. It also survives
++  the `Page` wrapper being moved (not just kept alive), since the `Rc`/`Weak`
++  point at the heap allocation, not at wherever the `Page` struct itself
++  happens to live on the stack.
++- **Verification note:** before implementing, confirm whether `Page`/the
++  underlying JS runtime handle needs to remain `Send` (e.g. if any embedder
++  moves a `Page` into a spawned task on a multi-threaded async runtime). A
++  quick compile-time check (a scratch test asserting `Page: Send`) will settle
++  this. If `Page` is already not `Send` today (likely, if it wraps a V8
++  isolate handle, since V8 isolates must stay pinned to their creating
++  thread), use plain `Rc`/`RefCell` — no loss of capability. If it somehow is
++  `Send` today, use `Arc<tokio::sync::Mutex<InnerPage>>` instead to avoid a
++  regression, and be careful not to hold the lock across an `.await` point if
++  any of `Page`'s methods are `async`.
++- This change should be containable to the crate that defines the public
++  `Element`/`Page` wrapper types; the crate underneath that implements the
++  actual browser/page logic should not need to change.
++
++**For `ObscuraElemName`:** keep the `Ref` mapped all the way down to the field
++instead of erasing it to `Ref<'a, ()>`. Concretely, change the construction so
++it produces a `Ref<'a, QualName>` directly (via `Ref::map` on the arena borrow,
++matching against the node and its data variant, panicking on the same
++invalid-node/non-element cases the current code already panics on), store that
++as the struct's only field, and implement the trait methods and `Debug` via
++ordinary field access/`Deref` (`&self.name`, `&self.name.ns`, `&self.name.local`)
++instead of raw-pointer dereferences. `Ref::map` exists precisely for "borrow a
++sub-field of something behind a `RefCell` and keep the runtime borrow-check
++alive for as long as you hold the sub-borrow" — this is a straightforward,
++fully safe use of it, and removes all three `unsafe` blocks in this file in one
++change.
++
++## Why this matters
++
++Both are real memory-safety bugs (a dangling-pointer dereference and a
++mutable-aliasing violation) reachable from the project's own public embedding
++API — not from untrusted page content, but from ordinary use of the library by
++its host application (e.g. querying an element, then moving or continuing to
++use the `Page` it came from). Fixing them removes real `unsafe` code with no
++loss of functionality and no measurable performance cost.
+diff --git a/crates/obscura-dom/src/tree_sink.rs b/crates/obscura-dom/src/tree_sink.rs
+index 674732f..f2820d1 100644
+--- a/crates/obscura-dom/src/tree_sink.rs
++++ b/crates/obscura-dom/src/tree_sink.rs
+@@ -9,24 +9,22 @@ use html5ever::{Attribute as HtmlAttribute, LocalName, Namespace, QualName};
+ use crate::tree::{Attribute, DomTree, NodeData, NodeId};
+ 
+ pub struct ObscuraElemName<'a> {
+-    _ref: Ref<'a, ()>,
+-    name: *const QualName,
++    name: Ref<'a, QualName>,
+ }
+ 
+ impl<'a> fmt::Debug for ObscuraElemName<'a> {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        let name = unsafe { &*self.name };
+-        write!(f, "{:?}", name)
++        write!(f, "{:?}", &*self.name)
+     }
+ }
+ 
+ impl<'a> ElemName for ObscuraElemName<'a> {
+     fn ns(&self) -> &Namespace {
+-        unsafe { &(*self.name).ns }
++        &self.name.ns
+     }
+ 
+     fn local_name(&self) -> &LocalName {
+-        unsafe { &(*self.name).local }
++        &self.name.local
+     }
+ }
+ 
+@@ -47,18 +45,16 @@ impl TreeSink for DomTree {
+ 
+     fn elem_name<'a>(&'a self, target: &'a NodeId) -> ObscuraElemName<'a> {
+         let borrow = self.borrow_inner();
+-        let node = borrow.nodes.get(target.index())
+-            .and_then(|n| n.as_ref())
+-            .expect("elem_name called on invalid node");
+-        let name_ptr: *const QualName = match &node.data {
+-            NodeData::Element { name, .. } => name as *const QualName,
+-            _ => panic!("elem_name called on non-element"),
+-        };
+-        let ref_guard = Ref::map(borrow, |_| &());
+-        ObscuraElemName {
+-            _ref: ref_guard,
+-            name: name_ptr,
+-        }
++        let name = Ref::map(borrow, |borrow| {
++            let node = borrow.nodes.get(target.index())
++                .and_then(|n| n.as_ref())
++                .expect("elem_name called on invalid node");
++            match &node.data {
++                NodeData::Element { name, .. } => name,
++                _ => panic!("elem_name called on non-element"),
++            }
++        });
++        ObscuraElemName { name }
+     }
+ 
+     fn create_element(
+diff --git a/crates/obscura/examples/basic.rs b/crates/obscura/examples/basic.rs
+index c4be26b..2fa21ea 100644
+--- a/crates/obscura/examples/basic.rs
++++ b/crates/obscura/examples/basic.rs
+@@ -15,8 +15,8 @@ async fn main() -> anyhow::Result<()> {
+     println!("Content length: {}", page.content().len());
+ 
+     let el = page.wait_for_selector("a", Duration::from_secs(5)).await?;
+-    println!("Link text: {}", el.text());
+-    println!("Link href: {:?}", el.attribute("href"));
++    println!("Link text: {}", el.text()?);
++    println!("Link href: {:?}", el.attribute("href")?);
+ 
+     Ok(())
+ }
+diff --git a/crates/obscura/src/browser.rs b/crates/obscura/src/browser.rs
+index 4575bce..7146840 100644
+--- a/crates/obscura/src/browser.rs
++++ b/crates/obscura/src/browser.rs
+@@ -1,3 +1,5 @@
++use std::cell::RefCell;
++use std::rc::Rc;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+@@ -56,7 +58,7 @@ impl Browser {
+             self.context.clone(),
+         );
+         Ok(Page {
+-            inner: page,
++            inner: Rc::new(RefCell::new(page)),
+         })
+     }
+ 
+diff --git a/crates/obscura/src/error.rs b/crates/obscura/src/error.rs
+index a30487a..76025c1 100644
+--- a/crates/obscura/src/error.rs
++++ b/crates/obscura/src/error.rs
+@@ -17,6 +17,9 @@ pub enum Error {
+     #[error("no page session")]
+     NoPage,
+ 
++    #[error("page was dropped")]
++    PageDropped,
++
+     #[error(transparent)]
+     Internal(#[from] anyhow::Error),
+ }
+diff --git a/crates/obscura/src/page.rs b/crates/obscura/src/page.rs
+index 38fb2d2..d034bd3 100644
+--- a/crates/obscura/src/page.rs
++++ b/crates/obscura/src/page.rs
+@@ -1,3 +1,5 @@
++use std::cell::RefCell;
++use std::rc::{Rc, Weak};
+ use std::time::Duration;
+ 
+ use obscura_browser::lifecycle::WaitUntil;
+@@ -17,13 +19,14 @@ fn nid_from_value(v: &Value) -> Option<u64> {
+ 
+ /// A browser tab/page.
+ pub struct Page {
+-    pub(crate) inner: InnerPage,
++    pub(crate) inner: Rc<RefCell<InnerPage>>,
+ }
+ 
+ impl Page {
+     /// Navigate to URL and wait for load.
+     pub async fn goto(&mut self, url: &str) -> Result<(), Error> {
+         self.inner
++            .borrow_mut()
+             .navigate_with_wait(url, WaitUntil::Load)
+             .await
+             .map_err(|e| Error::Navigation(e.to_string()))
+@@ -31,12 +34,12 @@ impl Page {
+ 
+     /// Get current URL.
+     pub fn url(&self) -> String {
+-        self.inner.url_string()
++        self.inner.borrow().url_string()
+     }
+ 
+     /// Execute JS in the page.
+     pub fn evaluate(&mut self, expression: &str) -> Value {
+-        self.inner.evaluate(expression)
++        self.inner.borrow_mut().evaluate(expression)
+     }
+ 
+     /// Get page HTML content.
+@@ -53,7 +56,7 @@ impl Page {
+             escaped
+         );
+         let val = self.evaluate(&js);
+-        nid_from_value(&val).map(|nid| Element { node_id: nid, page: self as *const Page })
++        nid_from_value(&val).map(|nid| Element { node_id: nid, page: Rc::downgrade(&self.inner) })
+     }
+ 
+     /// Wait for CSS selector to appear (polls every 100ms).
+@@ -71,7 +74,7 @@ impl Page {
+             );
+             let val = self.evaluate(&js);
+             if let Some(nid) = nid_from_value(&val) {
+-                return Ok(Element { node_id: nid, page: self as *const Page });
++                return Ok(Element { node_id: nid, page: Rc::downgrade(&self.inner) });
+             }
+             if start.elapsed() > timeout {
+                 return Err(Error::Timeout(format!(
+@@ -90,7 +93,7 @@ impl Page {
+     /// setTimeout, RxJS subscribers) to let the V8 event loop pump and
+     /// resolve scheduled microtasks/macrotasks before the next `evaluate()`.
+     pub async fn settle(&mut self, max_ms: u64) {
+-        self.inner.settle(max_ms).await
++        self.inner.borrow_mut().settle(max_ms).await
+     }
+ 
+     /// Register a script that runs before any of the page's own `<script>` tags,
+@@ -98,7 +101,7 @@ impl Page {
+     /// `goto()` / navigation. Use it to install a fetch()/XHR interceptor or any
+     /// other page-init logic before the page's bootstrap runs.
+     pub fn add_preload_script(&mut self, script: &str) {
+-        self.inner.add_preload_script(script);
++        self.inner.borrow_mut().add_preload_script(script);
+     }
+ 
+     /// Enable CDP-Fetch-style interception of every JS `fetch()`/XHR. Returns a
+@@ -108,7 +111,7 @@ impl Page {
+     pub fn enable_interception(
+         &mut self,
+     ) -> tokio::sync::mpsc::UnboundedReceiver<InterceptedRequest> {
+-        self.inner.enable_interception()
++        self.inner.borrow_mut().enable_interception()
+     }
+ 
+     /// Register a passive callback fired for every request the page makes
+@@ -116,7 +119,7 @@ impl Page {
+     /// and before it is sent. Non-blocking; use `enable_interception` to mutate
+     /// or block. Returns a stable id; pass it to `off_request` to detach.
+     pub fn on_request(&mut self, cb: RequestCallback) -> u64 {
+-        self.inner.on_request(cb)
++        self.inner.borrow_mut().on_request(cb)
+     }
+ 
+     /// Register a passive callback fired with every response the page receives
+@@ -124,7 +127,7 @@ impl Page {
+     /// main path for capturing API response payloads from SPAs. Returns a stable
+     /// id; pass it to `off_response` to detach.
+     pub fn on_response(&mut self, cb: ResponseCallback) -> u64 {
+-        self.inner.on_response(cb)
++        self.inner.borrow_mut().on_response(cb)
+     }
+ 
+     /// Detach a request callback previously registered with `on_request`.
+@@ -132,55 +135,57 @@ impl Page {
+     /// scoped to this page — they never fire for sibling pages and are
+     /// dropped with the page (issue #408).
+     pub fn off_request(&mut self, id: u64) -> bool {
+-        self.inner.off_request(id)
++        self.inner.borrow_mut().off_request(id)
+     }
+ 
+     /// Detach a response callback previously registered with `on_response`.
+     /// Returns true if a callback with that id was removed.
+     pub fn off_response(&mut self, id: u64) -> bool {
+-        self.inner.off_response(id)
++        self.inner.borrow_mut().off_response(id)
+     }
+ }
+ 
+ /// Handle to a DOM element.
+ ///
+-/// Created via [`Page::query_selector`] or [`Page::wait_for_selector`].
++/// Created via [`Page::query_selector`] or [`Page::wait_for_selector`]. Stays
++/// valid independently of whether the originating [`Page`] is later moved;
++/// becomes inert (returns [`Error::PageDropped`]) once the `Page` is dropped.
+ pub struct Element {
+     node_id: u64,
+-    page: *const Page,
++    page: Weak<RefCell<InnerPage>>,
+ }
+ 
+ impl Element {
+     /// Get text content of this element.
+-    pub fn text(&self) -> String {
+-        let page = unsafe { &mut *(self.page as *mut Page) };
+-        let val = page.evaluate(&format!(
++    pub fn text(&self) -> Result<String, Error> {
++        let page = self.page.upgrade().ok_or(Error::PageDropped)?;
++        let val = page.borrow_mut().evaluate(&format!(
+             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.textContent : ''; }})()",
+             self.node_id
+         ));
+-        val.as_str().unwrap_or("").to_string()
++        Ok(val.as_str().unwrap_or("").to_string())
+     }
+ 
+     /// Get an attribute value.
+-    pub fn attribute(&self, name: &str) -> Option<String> {
+-        let page = unsafe { &mut *(self.page as *mut Page) };
+-        let val = page.evaluate(&format!(
++    pub fn attribute(&self, name: &str) -> Result<Option<String>, Error> {
++        let page = self.page.upgrade().ok_or(Error::PageDropped)?;
++        let val = page.borrow_mut().evaluate(&format!(
+             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.getAttribute('{}') : null; }})()",
+             self.node_id, name
+         ));
+-        if val.is_null() { None } else { Some(val.as_str().unwrap_or("").to_string()) }
++        Ok(if val.is_null() { None } else { Some(val.as_str().unwrap_or("").to_string()) })
+     }
+ 
+     /// Click this element.
+     pub fn click(&self) -> Result<(), Error> {
+-        let page = unsafe { &mut *(self.page as *mut Page) };
++        let page = self.page.upgrade().ok_or(Error::PageDropped)?;
+         // Scroll into view
+-        page.evaluate(&format!(
++        page.borrow_mut().evaluate(&format!(
+             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) el.scrollIntoView({{block:'center'}}); }})()",
+             self.node_id
+         ));
+         // Click
+-        let result = page.evaluate(&format!(
++        let result = page.borrow_mut().evaluate(&format!(
+             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.click(); return true; }} return false; }})()",
+             self.node_id
+         ));

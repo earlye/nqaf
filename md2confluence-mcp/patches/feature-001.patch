@@ -1,0 +1,499 @@
+From 552210f16c42d5566734d5c936f994f442449cb3 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Tue, 21 Jul 2026 15:44:46 -0500
+Subject: [PATCH] Apply feature-001.md
+
+---
+ .nqaf/prompts/feature-001.md | 149 +++++++++++++++++++++++++++++++++++
+ README.md                    |  44 +++++++----
+ src/config.test.ts           |  32 ++++++++
+ src/config.ts                |  28 +++++++
+ src/converter.test.ts        |  19 ++++-
+ src/converter.ts             |  46 ++++++++---
+ src/index.ts                 |   8 +-
+ 7 files changed, 295 insertions(+), 31 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-001.md
+ create mode 100644 src/config.test.ts
+ create mode 100644 src/config.ts
+
+diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
+new file mode 100644
+index 0000000..e027b75
+--- /dev/null
++++ b/.nqaf/prompts/feature-001.md
+@@ -0,0 +1,149 @@
++# [feature-001.md]
++# Fix: read the Confluence token from `pass`, render Mermaid locally instead of via kroki.io
++
++This prompt depends on `feature-000.md` (test harness) having already run —
++it assumes a `"test"` script exists (`node --test` over compiled `dist/`) and
++that `src/**/*.test.ts` is the established location/convention for tests.
++
++## Problem 1 — credential handling
++
++`src/index.ts` (lines 16-26) reads `CONFLUENCE_TOKEN` (and `CONFLUENCE_URL`/`CONFLUENCE_EMAIL`)
++directly from `process.env`. That means every consumer has to export the raw
++Atlassian API token as a plaintext environment variable in their MCP server
++config (e.g. `~/.claude/settings.json` or a project's `.mcp.json`), leaving a
++live credential sitting in a config file on disk.
++
++## Fix 1
++
++Retrieve `CONFLUENCE_TOKEN` from the user's `pass` password store
++(https://www.passwordstore.org/) instead of requiring it as a plaintext env var.
++
++- Add an optional `CONFLUENCE_TOKEN_PASS_ENTRY` env var (default:
++  `confluence/api-token`) naming the `pass` entry to read.
++- Extract the token-resolution logic into a new `src/config.ts`, exporting
++  `export async function resolveConfluenceToken(env: NodeJS.ProcessEnv = process.env): Promise<string>`.
++  Keeping this out of `index.ts` (the server entrypoint, which starts the
++  stdio transport on import) is what lets it be unit-tested directly without
++  booting the whole MCP server.
++- `resolveConfluenceToken`:
++  - If `env.CONFLUENCE_TOKEN` is already set, return it directly — do not
++    shell out to `pass` at all. This keeps CI / non-interactive setups
++    working and is a supported override.
++  - Otherwise, if `pass` is available on `$PATH`, run `pass show <entry>`
++    (`<entry>` = `env.CONFLUENCE_TOKEN_PASS_ENTRY`, default
++    `confluence/api-token`), take the first line of stdout, trimmed, and
++    return it.
++  - Use `child_process.execFile` (via `util.promisify`) with the command and
++    args passed as an array — `execFile('pass', ['show', entry])` — never a
++    shell string/`exec`, even though `entry` isn't attacker-facing.
++  - If neither path yields a token (env var unset, `pass` missing from
++    `$PATH`, or `pass show` exits non-zero because the entry doesn't exist),
++    return `""` and let the existing `validateConfig()` in `index.ts` produce
++    its startup error.
++- In `index.ts`, replace the top-level `const CONFLUENCE_TOKEN = process.env.CONFLUENCE_TOKEN || ""`
++  with a top-level `await resolveConfluenceToken()` call (this file is
++  `"type": "module"`, so top-level `await` is valid — don't reach for
++  `execFileSync`/blocking calls here).
++- Update `validateConfig()`'s error text to document `pass` as the
++  primary/recommended option and the env var as the fallback.
++- Update the README's "Get API Token" / env var docs to describe the `pass`
++  workflow (`pass insert confluence/api-token`) as the recommended setup path.
++
++## Problem 2 — Mermaid rendering depends on a third-party network service
++
++`src/converter.ts`'s `renderMermaidToPng` (~lines 21-34) sends the raw Mermaid
++diagram source to `https://kroki.io/mermaid/png`, a public third-party
++rendering service. Every diagram in every synced doc leaves the network to get
++rendered, and rendering breaks entirely if kroki.io is unreachable or the
++diagram shouldn't leave the machine.
++
++## Fix 2
++
++Replace the kroki.io call with a local render via `@mermaid-js/mermaid-cli`
++(`mmdc`), invoked through `npx` so no separate install step is required.
++
++- Replace `renderMermaidToPng`'s body: write `code` to a temp `.mmd` file in
++  the OS temp dir, run
++  `npx -y -p @mermaid-js/mermaid-cli mmdc -i <tmpfile>.mmd -o <tmpfile>.png -b white`,
++  read back the resulting PNG bytes into a `Buffer`, then delete both temp
++  files (success or failure).
++- `npx` will fetch `@mermaid-js/mermaid-cli` on demand; note in the README
++  that the first render downloads a headless Chromium and may take a while.
++- Remove the kroki.io fetch call and the "via kroki.io" references in
++  comments/README (top-of-file comment in `converter.ts`, README feature list,
++  "How It Works" diagram/steps).
++- Known gotcha worth a code comment: Mermaid's own parser mishandles a literal
++  `#` immediately followed by digits inside note/label text (e.g. `#29380` in
++  `Note over X: ...`) — doesn't need a fix here, but if you touch any
++  label-escaping logic, be aware of it and don't "helpfully" strip/escape `#`
++  in a way that changes unrelated diagrams.
++
++## Problem 3 — README Installation section documents the wrong (unpatched) install path
++
++The README's "Installation" section (both the "Claude Code" and
++"Project-specific" snippets) tells readers to run
++`"command": "npx", "args": ["-y", "md2confluence-mcp"]` — the published
++upstream npm package. A reader following this fork's README would never
++actually run Fix 1/Fix 2 above; they'd silently get the unpatched, published
++version instead.
++
++## Fix 3
++
++Rewrite the Installation section to document building and running this fork
++from source instead of `npx`-ing the published package:
++
++- `git clone <this fork> && cd md2confluence-mcp && npm install && npm run build`
++- Then point the MCP config's `confluence` server at the built output directly:
++  ```json
++  {
++    "mcpServers": {
++      "confluence": {
++        "command": "node",
++        "args": ["/absolute/path/to/md2confluence-mcp/dist/index.js"],
++        "env": {
++          "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
++          "CONFLUENCE_EMAIL": "your@email.com"
++        }
++      }
++    }
++  }
++  ```
++  (note `CONFLUENCE_TOKEN` is intentionally omitted from the example now that
++  Fix 1 supports reading it from `pass`).
++- Apply this to both the "Claude Code" and "Project-specific" snippets.
++- This prompt only rewrites the fork's own README to describe how to build
++  and install *this* fork correctly — it does not modify any MCP config on
++  the machine the prompt happens to run on.
++
++## Integration tests
++
++Building on the `node:test` harness from `feature-000.md`, add:
++
++- `src/config.test.ts` covering `resolveConfluenceToken`:
++  - **Fixture setup/teardown**: before the test, create a throwaway `pass`
++    entry via `pass insert -m -f <test-entry>` (piping a known dummy value on
++    stdin so it's non-interactive), pointing at a test-only path (not
++    `confluence/api-token`); after the test, `pass rm -f <test-entry>`. Do not
++    depend on any pre-existing entry in the developer's real password store.
++  - Assert that calling `resolveConfluenceToken({ CONFLUENCE_TOKEN_PASS_ENTRY: <test-entry> })`
++    (with `CONFLUENCE_TOKEN` absent from the passed env) returns exactly the
++    dummy value.
++  - Assert the override path: when `CONFLUENCE_TOKEN` is present in the
++    passed env, `resolveConfluenceToken` returns it as-is (use a
++    `CONFLUENCE_TOKEN_PASS_ENTRY` that doesn't exist, to prove `pass` is never
++    consulted in this path).
++- A new mermaid-rendering test (e.g. in `src/converter.test.ts`) covering
++  Fix 2: call the exported `convertMarkdownToConfluence` with a markdown
++  string containing a fenced ` ```mermaid ` block, assert the returned
++  `attachments` array has exactly one entry, and assert its `.data` buffer's
++  first 8 bytes match the PNG magic number (`89 50 4E 47 0D 0A 1A 0A`). This
++  test invokes the real `npx ... mmdc` — on a machine without
++  `@mermaid-js/mermaid-cli` cached, the first run downloads a headless
++  Chromium and can take minutes. Give this specific test a generous timeout
++  (e.g. pass `{ timeout: 120_000 }` to `node:test`'s `test()`) rather than
++  relying on the runner's default.
++
++## Do not make other changes.
++
++Leave the Confluence upload/storage-format-conversion logic, the tool list,
++and everything else as-is.
+diff --git a/README.md b/README.md
+index 9089fd6..8f1f229 100644
+--- a/README.md
++++ b/README.md
+@@ -17,13 +17,24 @@
+ 
+ ## Features
+ 
+-- ✅ **Mermaid diagrams** → PNG (auto-converted via kroki.io)
++- ✅ **Mermaid diagrams** → PNG (rendered locally via `@mermaid-js/mermaid-cli`)
+ - ✅ **Code blocks** → Confluence Code macro
+ - ✅ **Images** → Attachments (auto-uploaded)
+ - ✅ **Tables, links, formatting** → Preserved
+ 
+ ## Installation
+ 
++This fork reads the Confluence API token from the `pass` password store
++instead of a plaintext env var (see [Get API Token](#get-api-token)), so it
++needs to be built and run from source rather than via `npx md2confluence-mcp`.
++
++```bash
++git clone <this fork's URL>
++cd md2confluence-mcp
++npm install
++npm run build
++```
++
+ ### Claude Code
+ 
+ Add to your Claude Code settings (`~/.claude/settings.json`):
+@@ -32,12 +43,11 @@ Add to your Claude Code settings (`~/.claude/settings.json`):
+ {
+   "mcpServers": {
+     "confluence": {
+-      "command": "npx",
+-      "args": ["-y", "md2confluence-mcp"],
++      "command": "node",
++      "args": ["/absolute/path/to/md2confluence-mcp/dist/index.js"],
+       "env": {
+         "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
+-        "CONFLUENCE_EMAIL": "your@email.com",
+-        "CONFLUENCE_TOKEN": "YOUR_API_TOKEN"
++        "CONFLUENCE_EMAIL": "your@email.com"
+       }
+     }
+   }
+@@ -52,12 +62,11 @@ Add to your project's `.mcp.json`:
+ {
+   "mcpServers": {
+     "confluence": {
+-      "command": "npx",
+-      "args": ["-y", "md2confluence-mcp"],
++      "command": "node",
++      "args": ["/absolute/path/to/md2confluence-mcp/dist/index.js"],
+       "env": {
+         "CONFLUENCE_URL": "https://your-domain.atlassian.net/wiki",
+-        "CONFLUENCE_EMAIL": "your@email.com",
+-        "CONFLUENCE_TOKEN": "YOUR_API_TOKEN"
++        "CONFLUENCE_EMAIL": "your@email.com"
+       }
+     }
+   }
+@@ -68,7 +77,11 @@ Add to your project's `.mcp.json`:
+ 
+ 1. Go to https://id.atlassian.com/manage/api-tokens
+ 2. Click "Create API token"
+-3. Copy the token to `CONFLUENCE_TOKEN`
++3. Store it in `pass` (recommended): `pass insert confluence/api-token`
++   - Use a different entry name by setting `CONFLUENCE_TOKEN_PASS_ENTRY`
++4. Alternatively, set the `CONFLUENCE_TOKEN` env var directly (fallback,
++   e.g. for CI/non-interactive setups) — note this leaves the token in
++   plaintext in your MCP server config
+ 
+ ## Usage
+ 
+@@ -158,14 +171,14 @@ https://company.atlassian.net/wiki/spaces/~712020.../overview
+ ```mermaid
+ flowchart LR
+     A["Markdown"] --> B["Parse"]
+-    B --> C["Mermaid → kroki.io → PNG"]
++    B --> C["Mermaid → mmdc (local) → PNG"]
+     C --> D["Convert to Confluence HTML"]
+     D --> E["Upload via REST API"]
+     E --> F["Attach images"]
+ ```
+ 
+ 1. **Parse** - Extract content, remove front matter
+-2. **Render** - Convert Mermaid diagrams to PNG via [kroki.io](https://kroki.io)
++2. **Render** - Convert Mermaid diagrams to PNG locally via [`mmdc`](https://github.com/mermaid-js/mermaid-cli) (run through `npx`; the first render downloads a headless Chromium and may take a while)
+ 3. **Convert** - Transform Markdown to Confluence storage format
+ 4. **Upload** - Create/update page via Confluence REST API
+ 5. **Attach** - Upload images as page attachments
+@@ -176,7 +189,8 @@ flowchart LR
+ |----------|----------|-------------|
+ | `CONFLUENCE_URL` | ✅ | e.g., `https://your-domain.atlassian.net/wiki` |
+ | `CONFLUENCE_EMAIL` | ✅ | Your Atlassian account email |
+-| `CONFLUENCE_TOKEN` | ✅ | API token |
++| `CONFLUENCE_TOKEN` | Fallback | API token (prefer storing it in `pass` instead, see [Get API Token](#get-api-token)) |
++| `CONFLUENCE_TOKEN_PASS_ENTRY` | | `pass` entry name for the API token (default: `confluence/api-token`) |
+ 
+ ## Development
+ 
+@@ -192,7 +206,7 @@ npm install
+ npm run build
+ 
+ # Test locally
+-CONFLUENCE_URL=... CONFLUENCE_EMAIL=... CONFLUENCE_TOKEN=... npm start
++CONFLUENCE_URL=... CONFLUENCE_EMAIL=... npm start
+ ```
+ 
+ ## License
+@@ -201,6 +215,6 @@ MIT
+ 
+ ## Credits
+ 
+-- [kroki.io](https://kroki.io) - Diagram rendering API
++- [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) - Local diagram rendering
+ - [Model Context Protocol](https://modelcontextprotocol.io) - MCP SDK
+ - [Confluence REST API](https://developer.atlassian.com/cloud/confluence/rest/)
+\ No newline at end of file
+diff --git a/src/config.test.ts b/src/config.test.ts
+new file mode 100644
+index 0000000..43cc418
+--- /dev/null
++++ b/src/config.test.ts
+@@ -0,0 +1,32 @@
++import { test, before, after } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "child_process";
++import { resolveConfluenceToken } from "./config.js";
++
++const TEST_PASS_ENTRY = "md2confluence-mcp-test/api-token";
++const DUMMY_TOKEN = "dummy-test-token-12345";
++
++before(() => {
++  execFileSync("pass", ["insert", "-m", "-f", TEST_PASS_ENTRY], {
++    input: DUMMY_TOKEN,
++  });
++});
++
++after(() => {
++  execFileSync("pass", ["rm", "-f", TEST_PASS_ENTRY]);
++});
++
++test("resolveConfluenceToken reads the token from pass when env var is unset", async () => {
++  const token = await resolveConfluenceToken({
++    CONFLUENCE_TOKEN_PASS_ENTRY: TEST_PASS_ENTRY,
++  } as NodeJS.ProcessEnv);
++  assert.equal(token, DUMMY_TOKEN);
++});
++
++test("resolveConfluenceToken returns the env var override without consulting pass", async () => {
++  const token = await resolveConfluenceToken({
++    CONFLUENCE_TOKEN: "env-override-token",
++    CONFLUENCE_TOKEN_PASS_ENTRY: "md2confluence-mcp-test/does-not-exist",
++  } as NodeJS.ProcessEnv);
++  assert.equal(token, "env-override-token");
++});
+diff --git a/src/config.ts b/src/config.ts
+new file mode 100644
+index 0000000..931269a
+--- /dev/null
++++ b/src/config.ts
+@@ -0,0 +1,28 @@
++import { execFile } from "child_process";
++import { promisify } from "util";
++
++const execFileAsync = promisify(execFile);
++
++const DEFAULT_PASS_ENTRY = "confluence/api-token";
++
++/**
++ * Resolve the Confluence API token, preferring an explicit env var
++ * override and falling back to the `pass` password store so the raw
++ * token never has to live in a plaintext MCP server config.
++ */
++export async function resolveConfluenceToken(
++  env: NodeJS.ProcessEnv = process.env
++): Promise<string> {
++  if (env.CONFLUENCE_TOKEN) {
++    return env.CONFLUENCE_TOKEN;
++  }
++
++  const entry = env.CONFLUENCE_TOKEN_PASS_ENTRY || DEFAULT_PASS_ENTRY;
++
++  try {
++    const { stdout } = await execFileAsync("pass", ["show", entry]);
++    return stdout.split("\n")[0].trim();
++  } catch {
++    return "";
++  }
++}
+diff --git a/src/converter.test.ts b/src/converter.test.ts
+index c173914..0261367 100644
+--- a/src/converter.test.ts
++++ b/src/converter.test.ts
+@@ -1,6 +1,8 @@
+ import { test } from "node:test";
+ import assert from "node:assert/strict";
+-import { extractTitle, removeFrontMatter } from "./converter.js";
++import { convertMarkdownToConfluence, extractTitle, removeFrontMatter } from "./converter.js";
++
++const PNG_MAGIC_NUMBER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+ 
+ test("removeFrontMatter strips YAML front matter", () => {
+   const markdown = "---\ntitle: Hello\n---\n# Hello\n\nBody text";
+@@ -26,3 +28,18 @@ test("extractTitle falls back to provided default when nothing found", () => {
+   const markdown = "Body text with no heading";
+   assert.equal(extractTitle(markdown, "Fallback"), "Fallback");
+ });
++
++test(
++  "convertMarkdownToConfluence renders a mermaid block to a PNG attachment",
++  { timeout: 120_000 },
++  async () => {
++    const markdown = "# Title\n\n```mermaid\nflowchart LR\n  A --> B\n```\n";
++    const result = await convertMarkdownToConfluence(markdown);
++
++    assert.equal(result.attachments.length, 1);
++    assert.deepEqual(
++      result.attachments[0].data.subarray(0, 8),
++      PNG_MAGIC_NUMBER
++    );
++  }
++);
+diff --git a/src/converter.ts b/src/converter.ts
+index 8b8a8bd..a9c4847 100644
+--- a/src/converter.ts
++++ b/src/converter.ts
+@@ -1,11 +1,18 @@
+ /**
+  * Markdown to Confluence converter
+  * - Converts Markdown to Confluence storage format
+- * - Renders Mermaid diagrams to PNG via kroki.io
++ * - Renders Mermaid diagrams to PNG locally via @mermaid-js/mermaid-cli
+  */
+ 
+ import { marked } from "marked";
+ import { createHash } from "crypto";
++import { execFile } from "child_process";
++import { promisify } from "util";
++import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
++import { tmpdir } from "os";
++import { join } from "path";
++
++const execFileAsync = promisify(execFile);
+ 
+ interface Attachment {
+   filename: string;
+@@ -18,21 +25,34 @@ interface ConversionResult {
+ }
+ 
+ /**
+- * Render Mermaid diagram to PNG using kroki.io
++ * Render Mermaid diagram to PNG locally using `mmdc` (mermaid-cli) via npx.
++ * Mermaid's parser mishandles a literal `#` immediately followed by digits
++ * inside note/label text (e.g. `#29380` in `Note over X: ...`); this is a
++ * pre-existing Mermaid limitation, not something to "fix" by escaping `#`.
+  */
+ async function renderMermaidToPng(code: string): Promise<Buffer> {
+-  const response = await fetch("https://kroki.io/mermaid/png", {
+-    method: "POST",
+-    headers: { "Content-Type": "text/plain" },
+-    body: code,
+-  });
+-
+-  if (!response.ok) {
+-    throw new Error(`Kroki API error: ${response.status}`);
++  const dir = await mkdtemp(join(tmpdir(), "mermaid-"));
++  const inputPath = join(dir, "diagram.mmd");
++  const outputPath = join(dir, "diagram.png");
++
++  try {
++    await writeFile(inputPath, code, "utf-8");
++    await execFileAsync("npx", [
++      "-y",
++      "-p",
++      "@mermaid-js/mermaid-cli",
++      "mmdc",
++      "-i",
++      inputPath,
++      "-o",
++      outputPath,
++      "-b",
++      "white",
++    ]);
++    return await readFile(outputPath);
++  } finally {
++    await rm(dir, { recursive: true, force: true });
+   }
+-
+-  const arrayBuffer = await response.arrayBuffer();
+-  return Buffer.from(arrayBuffer);
+ }
+ 
+ /**
+diff --git a/src/index.ts b/src/index.ts
+index 006d4e6..7d0816d 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -11,11 +11,12 @@ import { readFileSync, existsSync } from "fs";
+ import { resolve } from "path";
+ import { ConfluenceClient } from "./confluence.js";
+ import { convertMarkdownToConfluence } from "./converter.js";
++import { resolveConfluenceToken } from "./config.js";
+ 
+ // Environment variables
+ const CONFLUENCE_URL = process.env.CONFLUENCE_URL || "";
+ const CONFLUENCE_EMAIL = process.env.CONFLUENCE_EMAIL || "";
+-const CONFLUENCE_TOKEN = process.env.CONFLUENCE_TOKEN || "";
++const CONFLUENCE_TOKEN = await resolveConfluenceToken();
+ 
+ // Validate config
+ function validateConfig() {
+@@ -23,7 +24,10 @@ function validateConfig() {
+     console.error("Missing required environment variables:");
+     console.error("  CONFLUENCE_URL - e.g., https://your-domain.atlassian.net/wiki");
+     console.error("  CONFLUENCE_EMAIL - your Atlassian email");
+-    console.error("  CONFLUENCE_TOKEN - API token from https://id.atlassian.com/manage/api-tokens");
++    console.error("  CONFLUENCE_TOKEN - API token, resolved from the `pass` password store");
++    console.error("    entry named by CONFLUENCE_TOKEN_PASS_ENTRY (default: confluence/api-token),");
++    console.error("    or from the CONFLUENCE_TOKEN env var as a fallback.");
++    console.error("    Get a token at https://id.atlassian.com/manage/api-tokens");
+     process.exit(1);
+   }
+ }

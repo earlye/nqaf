@@ -37,10 +37,13 @@ refuses to run rather than falling back to a weaker guarantee.
 
 ## Consequences
 
-- nqaf re-implements each prompt from scratch against fresh upstream,
-  so the cost of a required method is that each re-apply touches
-  every `impl IO` in the tree, including any that upstream has added
-  since. It does not create merge conflicts.
+- nqaf carries each prompt's stored patch forward onto fresh upstream,
+  and re-implements from the prompt only when repairing the patch
+  isn't viable. The cost of a required method is that each re-apply
+  must touch every `impl IO` in the tree, including any that upstream
+  has added since. A new impl doesn't conflict with the patch, so it
+  surfaces as a compile failure in re-apply's final check rather than
+  as a merge conflict.
 - **Revisit when the extension set grows.** Reconsider
   `query_interface`, or a single hop interface, once the fork carries
   two or more IO extensions, or once one of them needs a group of

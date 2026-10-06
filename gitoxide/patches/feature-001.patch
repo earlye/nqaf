@@ -1,0 +1,256 @@
+From abe471a2d72b073ba447de2977ee2e483266b005 Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Sun, 9 Aug 2026 16:10:49 -0500
+Subject: [PATCH] Apply feature-001.md
+
+---
+ .nqaf/prompts/feature-001.md                  |  41 +++++++
+ README.md                                     |  12 ++
+ .../client/blocking_io/http/curl/remote.rs    |   4 +
+ .../src/client/blocking_io/http/mod.rs        |   7 ++
+ .../client/blocking_io/http/reqwest/remote.rs | 107 ++++++++++--------
+ 5 files changed, 122 insertions(+), 49 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-001.md
+
+diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
+new file mode 100644
+index 000000000..d89c7b747
+--- /dev/null
++++ b/.nqaf/prompts/feature-001.md
+@@ -0,0 +1,41 @@
++## Fix gix-transport's reqwest HTTP backend to support connect and read timeouts
++
++gix-transport/src/client/blocking_io/http/reqwest/remote.rs builds its
++reqwest::blocking::Client in Remote::default() with a hardcoded
++20-second .connect_timeout() and no .timeout() call at all — so a
++connection that hangs mid-response (stalls after connecting, e.g. a
++partitioned network or a slow/malicious server) blocks the calling
++thread indefinitely.
++
++The generic http::Options struct (client/blocking_io/http/mod.rs)
++already has a connect_timeout: Option<Duration> field, populated from
++the git-config key gitoxide.http.connectTimeout. The curl backend
++(client/blocking_io/http/curl/remote.rs) honors it via
++handle.connect_timeout(timeout). The reqwest backend never reads
++config.connect_timeout at all — it only touches config.extra_headers,
++config.follow_redirects, and config.backend.
++
++Please:
++
++  1. Make the reqwest backend honor Options.connect_timeout the same
++  way curl does, replacing the hardcoded 20s default with
++  config.connect_timeout.unwrap_or(Duration::from_secs(20)) (or
++  similar) when building the client in Remote::default().
++
++  2. Add a real overall/read timeout: call .timeout(duration) on the
++  reqwest::blocking::ClientBuilder so a stalled read after a
++  successful connect is also bounded. This likely needs a new Options
++  field (e.g. read_timeout or request_timeout: Option<Duration>) since
++  none currently exists for this purpose in either backend — check
++  whether it's worth mirroring on the curl side too (curl's
++  low_speed_limit/low_speed_time do something conceptually similar
++  there) for consistency, but that's optional.
++
++  3. Keep the existing configure_request extension point
++  (reqwest/mod.rs) as-is — it operates on a per-request Request built
++  after the client, and can't set a client-wide timeout, so it's not a
++  substitute for #1/#2.
++
++  4. Update the README.md to include a subsection (if not present) of
++  the "About this Fork" for "Fork Features," and a subsection of "Fork
++  Features" for the timeout settings.
+diff --git a/README.md b/README.md
+index 8dadbe541..1710d0475 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,18 @@ security and correctness fixes applied on top of upstream, tracked as prompts ra
+ history. Anyone re-mirroring this fork from a newer upstream release should look at the fork's NQAF prompt history
+ to find the fixes that need to be reapplied.
+ 
++### Fork Features
++
++* **HTTP client timeouts (`reqwest` backend)**: `gix_transport::client::blocking_io::http::Options` gained a
++  `read_timeout` field, and its existing `connect_timeout` field is now honored by the `reqwest` HTTP backend, not
++  just the `curl` one. Without these, a request that stalls after connecting (e.g. a partitioned network or a
++  slow/malicious server) could block the calling thread indefinitely when using the `reqwest` backend.
++  * `connect_timeout` bounds how long to wait for the connection to be established (`gitoxide.http.connectTimeout`),
++    defaulting to 20 seconds if unset.
++  * `read_timeout` bounds the entire request, including reading the response body, and is unset (no timeout) by
++    default. It is honored by both the `reqwest` and `curl` backends, but is not yet backed by a `git` or
++    `gitoxide` configuration key.
++
+ There are two primary ways to use `gitoxide`:
+ 
+ 1. **As Rust library**: Use the [`gix`](https://docs.rs/gix) crate as a Cargo dependency for API access.
+diff --git a/gix-transport/src/client/blocking_io/http/curl/remote.rs b/gix-transport/src/client/blocking_io/http/curl/remote.rs
+index d98ae97e0..c30ca7b47 100644
+--- a/gix-transport/src/client/blocking_io/http/curl/remote.rs
++++ b/gix-transport/src/client/blocking_io/http/curl/remote.rs
+@@ -339,6 +339,7 @@ pub fn new() -> Worker {
+                     low_speed_limit_bytes_per_second,
+                     low_speed_time_seconds,
+                     connect_timeout,
++                    read_timeout,
+                     proxy,
+                     no_proxy,
+                     proxy_auth_method,
+@@ -436,6 +437,9 @@ pub fn new() -> Worker {
+             if let Some(timeout) = connect_timeout {
+                 handle.connect_timeout(timeout)?;
+             }
++            if let Some(timeout) = read_timeout {
++                handle.timeout(timeout)?;
++            }
+             {
+                 let mut auth = Auth::new();
+                 match proxy_auth_method {
+diff --git a/gix-transport/src/client/blocking_io/http/mod.rs b/gix-transport/src/client/blocking_io/http/mod.rs
+index fdcb04fe8..014295302 100644
+--- a/gix-transport/src/client/blocking_io/http/mod.rs
++++ b/gix-transport/src/client/blocking_io/http/mod.rs
+@@ -168,6 +168,12 @@ pub struct Options {
+     /// If `None`, this typically defaults to 2 minutes to 5 minutes.
+     /// Refers to `gitoxide.http.connectTimeout`.
+     pub connect_timeout: Option<std::time::Duration>,
++    /// The amount of time to wait for an entire request - including reading the response body - to complete
++    /// before aborting it, bounding connections that stall after a successful connect.
++    ///
++    /// If `None`, no such timeout is enforced. This is a `gitoxide` fork addition and is not yet backed by a
++    /// `git` or `gitoxide` configuration key.
++    pub read_timeout: Option<std::time::Duration>,
+     /// If enabled, emit additional information about connections and possibly the data received or written.
+     pub verbose: bool,
+     /// If set, use this path to point to a file with CA certificates to verify peers.
+@@ -197,6 +203,7 @@ impl Default for Options {
+             proxy_authenticate: None,
+             user_agent: None,
+             connect_timeout: None,
++            read_timeout: None,
+             verbose: false,
+             ssl_ca_info: None,
+             ssl_version: None,
+diff --git a/gix-transport/src/client/blocking_io/http/reqwest/remote.rs b/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
+index ac2c9cb61..503137eb0 100644
+--- a/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
++++ b/gix-transport/src/client/blocking_io/http/reqwest/remote.rs
+@@ -57,55 +57,10 @@ impl Default for Remote {
+             let mut follow = None;
+             let redirect_action = Arc::new(Mutex::new(RedirectAction::Stop));
+             let redirect_tail = Arc::new(Mutex::new(String::new()));
+-
+-            // We may error while configuring, which is expected as part of the internal protocol. The error will be
+-            // received and the sender of the request might restart us.
+-            let client = reqwest::blocking::ClientBuilder::new()
+-                .connect_timeout(std::time::Duration::from_secs(20))
+-                .http1_title_case_headers()
+-                .redirect(reqwest::redirect::Policy::custom({
+-                    let redirect_action = redirect_action.clone();
+-                    let redirect_tail = redirect_tail.clone();
+-                    move |attempt| {
+-                        match *redirect_action.lock() {
+-                            RedirectAction::Follow => {
+-                                let curr_url = attempt.url();
+-                                let prev_urls = attempt.previous();
+-                                // emulate default git behaviour which relies on curl default behaviour apparently.
+-                                const CURL_DEFAULT_REDIRS: usize = 50;
+-                                if prev_urls.len() >= CURL_DEFAULT_REDIRS {
+-                                    return attempt.error("too many redirects");
+-                                }
+-
+-                                match prev_urls.last() {
+-                                    Some(prev_url) if !redirect::scheme_is_safe(curr_url.as_str(), prev_url.as_str()) => {
+-                                        // Don't follow insecure protocol redirects, particularly https-to-http downgrades.
+-                                        attempt.stop()
+-                                    }
+-                                    Some(prev_url) if authority_changed(curr_url, prev_url) => {
+-                                        // Allowed only if the tail doesn't change.
+-                                        let redirect_tail = redirect_tail.lock();
+-                                        if curr_url.as_str().ends_with(redirect_tail.as_str()) {
+-                                            attempt.follow()
+-                                        } else {
+-                                            let curr_url = curr_url.as_str().to_owned();
+-                                            let redirect_tail = redirect_tail.to_string();
+-                                            attempt.error(format!(
+-                                                "redirect url {curr_url:?} does not end with expected request suffix {redirect_tail:?}",
+-                                            ))
+-                                        }
+-                                    }
+-                                    _ => attempt.follow(),
+-                                }
+-                            }
+-                            RedirectAction::RejectConfiguredHeaders => {
+-                                attempt.error("refusing to follow redirect after request headers were configured")
+-                            }
+-                            RedirectAction::Stop => attempt.stop(),
+-                        }
+-                    }
+-                }))
+-                .build()?;
++            // Built lazily from the first request's `config`, as connect/read timeouts are client-wide settings in
++            // `reqwest` and aren't known until then. We may error while configuring, which is expected as part of the
++            // internal protocol. The error will be received and the sender of the request might restart us.
++            let mut client: Option<reqwest::blocking::Client> = None;
+ 
+             for Request {
+                 url,
+@@ -115,6 +70,60 @@ impl Default for Remote {
+                 config,
+             } in req_recv
+             {
++                if client.is_none() {
++                    client = Some(
++                        reqwest::blocking::ClientBuilder::new()
++                            .connect_timeout(config.connect_timeout.unwrap_or(std::time::Duration::from_secs(20)))
++                            .timeout(config.read_timeout)
++                            .http1_title_case_headers()
++                            .redirect(reqwest::redirect::Policy::custom({
++                                let redirect_action = redirect_action.clone();
++                                let redirect_tail = redirect_tail.clone();
++                                move |attempt| {
++                                    match *redirect_action.lock() {
++                                        RedirectAction::Follow => {
++                                            let curr_url = attempt.url();
++                                            let prev_urls = attempt.previous();
++                                            // emulate default git behaviour which relies on curl default behaviour apparently.
++                                            const CURL_DEFAULT_REDIRS: usize = 50;
++                                            if prev_urls.len() >= CURL_DEFAULT_REDIRS {
++                                                return attempt.error("too many redirects");
++                                            }
++
++                                            match prev_urls.last() {
++                                                Some(prev_url)
++                                                    if !redirect::scheme_is_safe(curr_url.as_str(), prev_url.as_str()) =>
++                                                {
++                                                    // Don't follow insecure protocol redirects, particularly https-to-http downgrades.
++                                                    attempt.stop()
++                                                }
++                                                Some(prev_url) if authority_changed(curr_url, prev_url) => {
++                                                    // Allowed only if the tail doesn't change.
++                                                    let redirect_tail = redirect_tail.lock();
++                                                    if curr_url.as_str().ends_with(redirect_tail.as_str()) {
++                                                        attempt.follow()
++                                                    } else {
++                                                        let curr_url = curr_url.as_str().to_owned();
++                                                        let redirect_tail = redirect_tail.to_string();
++                                                        attempt.error(format!(
++                                                            "redirect url {curr_url:?} does not end with expected request suffix {redirect_tail:?}",
++                                                        ))
++                                                    }
++                                                }
++                                                _ => attempt.follow(),
++                                            }
++                                        }
++                                        RedirectAction::RejectConfiguredHeaders => attempt
++                                            .error("refusing to follow redirect after request headers were configured"),
++                                        RedirectAction::Stop => attempt.stop(),
++                                    }
++                                }
++                            }))
++                            .build()?,
++                    );
++                }
++                let client = client.as_ref().expect("just built above if absent");
++
+                 let redirected_base_url = redirected_base_url_shared.lock().clone();
+                 let effective_url = redirect::swap_tails(redirected_base_url.as_deref(), &base_url, url.clone());
+                 let has_configured_extra_headers = !config.extra_headers.is_empty();

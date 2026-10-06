@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs scripts/export-patches for every tracked fork (each top-level directory
+# with a fork.txt), or only for the projects named as arguments. Keeps going
+# past failures and exits non-zero if any project failed.
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$#" -gt 0 ]; then
+  projects=("$@")
+else
+  projects=()
+  for f in "$ROOT_DIR"/*/fork.txt; do
+    [ -f "$f" ] && projects+=("$(basename "$(dirname "$f")")")
+  done
+fi
+
+if [ "${#projects[@]}" -eq 0 ]; then
+  echo "No projects found (no top-level directory with a fork.txt)" >&2
+  exit 1
+fi
+
+sorted=()
+while IFS= read -r project; do
+  sorted+=("${project%/}")
+done < <(printf '%s\n' "${projects[@]}" | sort -u)
+projects=("${sorted[@]}")
+
+succeeded=()
+failed=()
+for project in "${projects[@]}"; do
+  echo "=== $project"
+  if [ ! -f "$ROOT_DIR/$project/fork.txt" ]; then
+    echo "$project has no fork.txt; not a tracked fork" >&2
+    failed+=("$project")
+  elif "$ROOT_DIR/scripts/export-patches" "$project"; then
+    succeeded+=("$project")
+  else
+    failed+=("$project")
+  fi
+done
+
+echo
+echo "Succeeded (${#succeeded[@]}): ${succeeded[*]:-none}"
+echo "Failed (${#failed[@]}): ${failed[*]:-none}"
+[ "${#failed[@]}" -eq 0 ]
