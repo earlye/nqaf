@@ -1,1 +1,1 @@
-https://github.com/earlye-forks/md2confluence-mcp
+git@github.com:earlye-forks/md2confluence-mcp.git

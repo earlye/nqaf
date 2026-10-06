@@ -14,13 +14,19 @@
 
 declare -a names outcomes paths rationales
 
-# prepare_work_dir — clones the fork into work/ if needed, points the upstream
-# remote at upstream.txt, fetches both, and sets upstream_head and
-# default_branch (the fork's).
+# `claude -p` kills background tasks after 600s by default; the agent may
+# delegate long implementation work to one, so wait for it instead.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
+
+# prepare_work_dir — clones the fork into work/ if needed (else points origin
+# at fork.txt), points the upstream remote at upstream.txt, fetches both, and
+# sets upstream_head and default_branch (the fork's).
 prepare_work_dir() {
   if [ ! -d "$WORK_DIR/.git" ]; then
     echo "Cloning $fork → $WORK_DIR"
     git clone --quiet --no-tags "$fork" "$WORK_DIR"
+  else
+    git -C "$WORK_DIR" remote set-url origin "$fork"
   fi
 
   # Ensure upstream remote exists
