@@ -8,7 +8,8 @@ set -euo pipefail
 # changed, or implement a prompt that has no patch yet. Each feature becomes
 # one "Apply <prompt>" commit, whose patch is exported back into this repo.
 # Then runs the fork's check once, pushes, and opens a PR into the fork's
-# default branch.
+# default branch. Exits 3 if everything ran but the check failed (the branch
+# is still pushed and the PR opened), and 1 on any other error.
 
 ENGINE="claude"
 MODEL=""
@@ -378,6 +379,7 @@ fi
 
 if [ "$check_result" = "fail" ]; then
   echo "CHECK FAILED — see $check_log" >&2
-  exit 1
+  # Distinct from errors (1): the run completed and the branch/PR exist.
+  exit 3
 fi
 echo "Done."
