@@ -49,6 +49,15 @@ refresh a fork. `apply`, `export-patches` and `re-apply` write
 `<fork-dir>/patches/`; review and commit those changes in this repo
 afterwards.
 
+Both agent-running scripts take `--model <id>`, passed to `claude --model`
+(default `claude-opus-5-5`); it is not passed to `oneclaw`. PRs they open
+start with an attribution line naming the engine and model, e.g.
+`** This is 🤖 Claude (Opus 5.5): **` (oneclaw PRs say `unspecified
+model`). The agent settings file `work/.claude/settings.json` is kept out of
+commits via `.git/info/exclude`, and `.claude/` is always left out of
+exported patches. If a fork already tracks that file from older runs, remove
+it from the fork yourself.
+
 1. **`scripts/mirror <fork-dir>`** — one-time setup for a brand-new fork.
    Runs `gh repo fork` on upstream, naming/owning the result to match
    `fork.txt`, so the fork remote is created as an exact copy of upstream
@@ -56,7 +65,7 @@ afterwards.
    and authenticated. Since this only creates the fork, it's a no-op (gh
    just reports the fork already exists) if run again later.
 
-2. **`scripts/apply [--engine claude|oneclaw] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
+2. **`scripts/apply [--engine claude|oneclaw] [--model <id>] <fork-dir> <branch> [prompts/feature-NNN.md ...]`**
    — clones the fork remote into `<fork-dir>/work` if needed, then checks out
    `<branch>` (creating it from the fork's default branch if it doesn't exist
    yet on origin, or checking out its current tip as-is if it does — this
@@ -92,11 +101,14 @@ afterwards.
    `work/` like `apply`, then for each prompt exports the most recent commit
    on the fork's default branch whose subject is exactly `Apply <prompt>`.
    The prompt hash is taken from that commit's `.nqaf/prompts/<prompt>`.
-   Prompts with no such commit (never applied, or squash-merged under a
-   different subject) are skipped with a warning; `re-apply` treats them as
-   new.
+   If a prompt has no such commit (e.g. its PR was squash-merged), it lists
+   the fork's merged PRs with `gh`, fetches each one's `refs/pull/<N>/head`
+   (GitHub keeps these after the branch is deleted), and uses the newest
+   merged PR that contains an `Apply <prompt>` commit. For those, `parent=`
+   is the pre-squash parent, which isn't on the default branch. Prompts
+   found nowhere are skipped with a warning; `re-apply` treats them as new.
 
-4. **`scripts/re-apply [--engine claude|oneclaw] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]`**
+4. **`scripts/re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]`**
    — for pulling in new upstream commits. A no-op if `upstream/HEAD` is
    already contained in the fork's default branch. Otherwise it creates a
    fresh branch `nqaf-rebase-YYYY-MM-DD` (with a `-2`, `-3`, … suffix if

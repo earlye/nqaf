@@ -54,5 +54,17 @@ fork forward, calling the agent only where needed.
   already carries it, the new commit is only a delta; its exported
   patch won't apply on fresh upstream by itself, so `re-apply` falls
   back to the agent. `apply` warns when this happens.
-- `export-patches` can't find features whose PRs were squash-merged
-  under a different subject; `re-apply` treats them as new.
+- For features whose PRs were squash-merged, `export-patches` falls
+  back to the merged PRs' `refs/pull/<N>/head` (via `gh`). Their
+  `parent=` is the pre-squash parent, which isn't on the default
+  branch.
+
+## Follow-ups folded in
+
+- `.claude/settings.json` is excluded via `.git/info/exclude`, never
+  staged, and `.claude/` is excluded from exported patches. Forks that
+  already track it keep it until the user removes it.
+- PR bodies from `apply` and `re-apply` start with
+  `** This is 🤖 <Harness> (<Model>): **`. `--model` is passed to
+  `claude --model` (default `claude-opus-5-5`); oneclaw gets no model
+  flag and reports `unspecified model`.

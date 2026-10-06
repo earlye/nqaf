@@ -11,16 +11,18 @@ set -euo pipefail
 # default branch.
 
 ENGINE="claude"
+MODEL=""
 PUSH=1
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --engine) ENGINE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
     --no-push) PUSH=0; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-FORK_DIR="${1:?Usage: re-apply [--engine claude|oneclaw] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]}"
+FORK_DIR="${1:?Usage: re-apply [--engine claude|oneclaw] [--model <id>] [--no-push] <fork-dir> [prompts/feature-NNN.md ...]}"
 shift
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
@@ -30,6 +32,7 @@ PATCHES_DIR="$CONFIG_DIR/patches"
 # shellcheck source=lib/patches.sh
 source "$ROOT_DIR/scripts/lib/patches.sh"
 
+MODEL="$(resolve_model "$ENGINE" "$MODEL")"
 upstream="$(cat "$CONFIG_DIR/upstream.txt")"
 fork="$(cat "$CONFIG_DIR/fork.txt")"
 
@@ -75,12 +78,9 @@ git -C "$WORK_DIR" reset --hard
 git -C "$WORK_DIR" clean -fd
 rm -rf "$WORK_DIR/.nqaf/decisions"
 
-# Agent decision files are read by this script and reported in the PR body;
-# they are never committed.
-exclude_file="$(git -C "$WORK_DIR" rev-parse --git-path info/exclude)"
-case "$exclude_file" in /*) ;; *) exclude_file="$WORK_DIR/$exclude_file" ;; esac
-mkdir -p "$(dirname "$exclude_file")"
-grep -qxF '.nqaf/decisions/' "$exclude_file" 2>/dev/null || echo '.nqaf/decisions/' >> "$exclude_file"
+# Agent decision files are read by this script and reported in the PR body,
+# and the agent settings file is per-checkout; neither is ever committed.
+exclude_local_files "$WORK_DIR"
 
 branch="nqaf-rebase-$(date +%Y-%m-%d)"
 n=1
@@ -110,7 +110,7 @@ EOF
   fi
   case "$ENGINE" in
     oneclaw) (cd "$WORK_DIR" && set -x && oneclaw run --prompt "$text") ;;
-    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose -p "$text") ;;
+    claude)  (cd "$WORK_DIR" && set -x && claude --dangerously-skip-permissions --verbose --model "$MODEL" -p "$text") ;;
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
   if [ "$created" -eq 1 ]; then
@@ -261,6 +261,7 @@ $(cat "$prompt")"
     mkdir -p "$WORK_DIR/.nqaf/prompts"
     cp "$prompt" "$WORK_DIR/.nqaf/prompts/$prompt_name"
     git -C "$WORK_DIR" add -A
+    unstage_local_files "$WORK_DIR"
     if git -C "$WORK_DIR" diff --cached --check 2>&1 | grep -q 'conflict marker'; then
       echo "Warning: conflict markers remain after $prompt_name" >&2
       outcome="$outcome (CONFLICT MARKERS REMAIN)"
@@ -308,6 +309,8 @@ echo "Check result: $check_result (log: $check_log)"
 
 pr_body="$(git -C "$WORK_DIR" rev-parse --absolute-git-dir)/nqaf-pr-body.md"
 {
+  attribution_line "$ENGINE" "$MODEL"
+  echo
   if [ "$check_result" = "fail" ]; then
     echo "> [!CAUTION]"
     echo "> **The check FAILED.** Do not merge until it passes. Output is at the bottom."

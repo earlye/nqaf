@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Shared helpers for storing per-feature patches in this repo.
+# Shared helpers: per-feature patch storage, local-file exclusion, and PR
+# attribution.
 # Sourced by scripts/apply, scripts/export-patches and scripts/re-apply.
 
 sha256_of() {
@@ -24,7 +25,10 @@ export_patch() {
   local parent hash
 
   mkdir -p "$dir"
-  git -C "$work" format-patch -1 --stdout --no-signature "$commit" > "$dir/$feature.patch"
+  # .claude/ holds per-checkout agent settings; older forks committed it, but
+  # it never belongs in a stored patch.
+  git -C "$work" format-patch --stdout --no-signature "$commit^!" -- . ':(exclude).claude' \
+    > "$dir/$feature.patch"
   parent="$(git -C "$work" rev-parse "$commit^")"
   hash="$(git -C "$work" show "$commit:.nqaf/prompts/$name" | sha256_of)"
 
@@ -51,4 +55,57 @@ export_patch() {
 base_value() {
   [ -f "$1" ] || return 0
   sed -n "s/^$2=//p" "$1" | head -n1
+}
+
+# exclude_local_files <work-dir> — keeps the agent settings file and agent
+# decision files out of `git add -A` (via .git/info/exclude).
+exclude_local_files() {
+  local exclude_file
+  exclude_file="$(git -C "$1" rev-parse --git-path info/exclude)"
+  case "$exclude_file" in /*) ;; *) exclude_file="$1/$exclude_file" ;; esac
+  mkdir -p "$(dirname "$exclude_file")"
+  for pattern in '.claude/settings.json' '.nqaf/decisions/'; do
+    grep -qxF "$pattern" "$exclude_file" 2>/dev/null || echo "$pattern" >> "$exclude_file"
+  done
+}
+
+# unstage_local_files <work-dir> — info/exclude doesn't stop changes to a file
+# the fork already tracks from being staged; drop them from the index. (The
+# tracked copy is left for the user to remove from the fork.)
+unstage_local_files() {
+  git -C "$1" reset -q -- .claude/settings.json 2>/dev/null || true
+}
+
+# model_display <model-id> — human name for the PR attribution line.
+model_display() {
+  case "$1" in
+    claude-opus-5-5) echo "Opus 5.5" ;;
+    claude-sonnet-5-5) echo "Sonnet 5.5" ;;
+    claude-fable-5-1) echo "Fable 5.1" ;;
+    claude-haiku-4-5*) echo "Haiku 4.5" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# attribution_line <engine> <model-id> — first line of every PR body.
+# oneclaw is not given a model (its model flag is unknown), so it reports
+# "unspecified model" regardless of --model.
+attribution_line() {
+  case "$1" in
+    claude) echo "** This is 🤖 Claude ($(model_display "$2")): **" ;;
+    oneclaw) echo "** This is 🤖 OneClaw (unspecified model): **" ;;
+    *) echo "** This is 🤖 $1 (unspecified model): **" ;;
+  esac
+}
+
+# resolve_model <engine> <model-id> — prints the model to use (claude
+# defaults to claude-opus-5-5), warning when --model can't be honoured.
+resolve_model() {
+  case "$1" in
+    claude) echo "${2:-claude-opus-5-5}" ;;
+    *)
+      [ -n "$2" ] && echo "Warning: --model is not passed to --engine $1; ignoring '$2'" >&2
+      echo ""
+      ;;
+  esac
 }
