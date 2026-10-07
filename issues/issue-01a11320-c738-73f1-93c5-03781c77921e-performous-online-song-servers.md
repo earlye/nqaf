@@ -32,3 +32,29 @@ appear in the UI, and where downloaded songs are stored.
 - Q: How does a game use the client: embedded library, shell-out CLI, or messages to a resident downloader service? — A: The **fetcher CLI** is the contract games depend on. The game runs it (e.g. `rgsf fetch <entry> --into <songs-dir>`) and reads progress as JSON lines on stdout. The reference CLI can download by itself at first and later hand off to a resident service or an existing torrent client (e.g. Transmission RPC) without games changing. The game embeds no networking, so supported download types are up to the fetcher. The fetcher is written in Rust.
 - Q: Does search also go through the CLI, or does the game query catalog servers directly? — A: Through the CLI (e.g. `rgsf search ... --json`). Performous needs no HTTP client.
 - Q: What do we call the three roles? — A: **catalog server**: answers searches and lists download options. **fetcher**: the standalone CLI (or service behind it) that searches and downloads. **host game**: Performous or any other game that shells out to the fetcher. Avoid "client", since both the fetcher and the host game are clients of something.
+
+## Draft ADR for the new repo
+
+To be copied to `docs/adr/0001-fetcher-cli-is-the-contract.md` in the protocol suite repo once it exists.
+
+```md
+# Host games shell out to the fetcher CLI instead of embedding a library
+
+Host games (Performous first) integrate by running the fetcher CLI for
+search and download and reading its JSON-lines progress on stdout. They
+do not link a client library. This keeps networking, BitTorrent, and the
+legal surface of fetching content out of every game. It lets the fetcher
+be written in Rust regardless of the game's language and license, and it
+lets the fetcher later hand downloads to a resident service or an
+existing torrent client without games changing.
+
+## Considered Options
+
+- **Embedded client library**: rejected. Every game would carry an HTTP
+  stack, and possibly libtorrent, in its own language and build system.
+  Performous has no HTTP client today.
+- **Message queue to a resident downloader service as the contract**:
+  not rejected outright, just kept behind the CLI. It needs an installed,
+  running, discoverable service before a game can do anything. The CLI
+  can start delegating to such a service later.
+```
