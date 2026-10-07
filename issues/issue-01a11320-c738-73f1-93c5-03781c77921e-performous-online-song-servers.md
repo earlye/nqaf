@@ -64,3 +64,5 @@ existing torrent client without games changing.
 - Note: the fetcher CLI has no name yet. `rgsf` in earlier answers was a placeholder the agent made up from `rg-song-finder`.
 - Q: How are entries assigned to shards, and how are edits and deletions handled? — A: The protocol doesn't mandate it; that's the catalog maintainer's call. The recommended practice is to append new entries to the highest-numbered shard, start a new shard at a size cap, edit lines in place, and delete by removing the line. So the fetcher must not assume which shard an entry is in.
 - Q: What identifies an entry? — A: A UUIDv7, unique across the whole catalog and never reused.
+- Q: What happens if an entry ID appears twice in one catalog? — A: The fetcher warns, and the newer entry wins. (What "newer" means is the next question.)
+- Q: What does one download deliver: a single song, or a pack of many? — A: Only single songs. One entry is one song. Packs as single downloads are rejected: per-song entries let the fetcher download many songs at once, from different mirrors, rather than pulling one big archive.
