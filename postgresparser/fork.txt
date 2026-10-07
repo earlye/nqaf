@@ -1,1 +1,1 @@
-git@github.com:earlye/postgresparser.git
+git@github.com:earlye-forks/postgresparser.git
