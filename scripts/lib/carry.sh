@@ -119,6 +119,7 @@ carry_feature() {
   decision_file="$WORK_DIR/.nqaf/decisions/$prompt_name"
   prompt_hash="$(sha256_of < "$prompt")"
   rm -f "$decision_file"
+  exclude_build_outputs "$WORK_DIR"
 
   if [ ! -f "$patch" ]; then
     path="no patch"
@@ -152,6 +153,13 @@ $(cat "$prompt")"
         echo "== $prompt_name: stored patch applied cleanly"
         path="patch, clean"
         outcome="clean"
+        # An older stored patch may carry build output; drop it from the
+        # commit (and so from the re-exported patch).
+        drop_build_outputs "$WORK_DIR" HEAD^
+        if ! git -C "$WORK_DIR" diff --cached --quiet HEAD; then
+          git -C "$WORK_DIR" commit -q --amend --no-edit
+          path="patch, clean (build output dropped)"
+        fi
       else
         # Un-commit, so the agent's update lands in the same single commit.
         git -C "$WORK_DIR" reset --soft HEAD^
@@ -241,6 +249,7 @@ $(cat "$prompt")"
     cp "$prompt" "$WORK_DIR/.nqaf/prompts/$prompt_name"
     git -C "$WORK_DIR" add -A
     unstage_local_files "$WORK_DIR"
+    drop_build_outputs "$WORK_DIR"
     if git -C "$WORK_DIR" diff --cached --check 2>&1 | grep -q 'conflict marker'; then
       echo "Warning: conflict markers remain after $prompt_name" >&2
       outcome="$outcome (CONFLICT MARKERS REMAIN)"
@@ -297,11 +306,12 @@ run_check() {
   echo "Check result: $check_result (log: $check_log)"
 }
 
-# write_pr_body <file> <intro> — the PR body: attribution, check warning,
-# <intro>, the per-feature outcome table, agent rationales, and the check
-# output if it failed.
+# write_pr_body <file> <intro> <branch> — the PR body: attribution, check
+# warning, <intro>, how to review and land it, the per-feature outcome table,
+# agent rationales, and the check output if it failed.
 write_pr_body() {
-  local i
+  local i slug
+  slug="$(github_slug "$fork")"
   {
     attribution_line "$ENGINE" "$MODEL"
     echo
@@ -311,6 +321,15 @@ write_pr_body() {
       echo
     fi
     echo "$2"
+    echo
+    echo "**Review:** [patch-only diff (upstream base → this branch)](https://github.com/$slug/compare/$upstream_head...$3)" \
+      "— just the fork's features on top of upstream \`$(git -C "$WORK_DIR" rev-parse --short "$upstream_head")\`." \
+      "This PR's own diff also includes every upstream change since \`$default_branch\` was last rebuilt."
+    echo
+    echo "**Land with a merge commit:** \`scripts/merge-pr $FORK_DIR <this PR's number>\`." \
+      "The branch ends in a merge of the old \`$default_branch\` (\`-s ours\`; its tree is the rebuilt one)," \
+      "so it merges cleanly; squash or rebase would drop that ancestry and the next re-apply would" \
+      "not see upstream as merged."
     echo
     echo "**Check:** $check_result — $check_desc"
     echo
@@ -353,11 +372,63 @@ print_summary() {
   echo "Updated patches are in $PATCHES_DIR — review and commit them in this repo."
 }
 
-# push_and_open_pr <branch> <title> <pr-body-file> — pushes <branch> to origin
-# (a normal push) and opens a PR into the fork's default branch, unless
-# --no-push. A missing gh or a failed PR creation is reported, not fatal.
+# supersede_default_branch — makes the fork's current default branch an
+# ancestor of HEAD without changing HEAD's tree (`git merge -s ours`), so the
+# PR merges cleanly and, once landed with a merge commit, upstream_head is an
+# ancestor of the default branch. Run after the Apply commits are built and
+# their patches exported (export_patch only reads each Apply commit, so the
+# merge never reaches a stored patch). Skipped if already an ancestor; exits
+# if the tree changes.
+supersede_default_branch() {
+  local target="origin/$default_branch" before after
+  git -C "$WORK_DIR" fetch --quiet --no-tags origin "$default_branch"
+  if git -C "$WORK_DIR" merge-base --is-ancestor "$target" HEAD; then
+    echo "$target is already an ancestor of HEAD; no supersede merge needed"
+    return 0
+  fi
+  before="$(git -C "$WORK_DIR" rev-parse 'HEAD^{tree}')"
+  git -C "$WORK_DIR" merge -q -s ours --no-edit \
+    -m "NQAF: supersede previous fork $default_branch" "$target"
+  after="$(git -C "$WORK_DIR" rev-parse 'HEAD^{tree}')"
+  if [ "$before" != "$after" ]; then
+    echo "BUG: the supersede merge changed the tree ($before → $after); aborting before push" >&2
+    exit 1
+  fi
+  echo "Merged $target into HEAD with -s ours (tree unchanged)"
+}
+
+# close_superseded_prs <new-pr-url> — closes this user's other open PRs in the
+# fork whose head is an nqaf-rebase-*/nqaf-rebuild-* branch in the fork
+# itself, commenting with a pointer to <new-pr-url> and deleting the branch.
+# Failures are reported, not fatal.
+close_superseded_prs() {
+  local new_url="$1" slug n head comment
+  slug="$(github_slug "$fork")"
+  comment="$(attribution_line "$ENGINE" "$MODEL")
+
+Superseded by $new_url, which carries the fork's features onto a newer upstream. Closing this PR and deleting its branch."
+  gh pr list --repo "$slug" --state open --author @me --limit 100 \
+      --json number,headRefName,isCrossRepository,url \
+      --jq ".[] | select(.isCrossRepository | not)
+                | select(.headRefName | test(\"^nqaf-(rebase|rebuild)-\"))
+                | select(.url != \"$new_url\")
+                | \"\\(.number) \\(.headRefName)\"" \
+    | while read -r n head; do
+        echo "Closing superseded PR #$n ($head)"
+        gh pr close "$n" --repo "$slug" --delete-branch --comment "$comment" \
+          || echo "Failed to close superseded PR #$n" >&2
+      done \
+    || echo "Couldn't list open PRs to close superseded ones" >&2
+}
+
+# push_and_open_pr <branch> <title> <pr-body-file> — merges the old default
+# branch in (supersede_default_branch), then pushes <branch> to origin (a
+# normal push), opens a PR into the fork's default branch and closes the PRs
+# it supersedes, unless --no-push. A missing gh or a failed PR creation is
+# reported, not fatal.
 push_and_open_pr() {
-  local branch="$1" title="$2" pr_body="$3"
+  local branch="$1" title="$2" pr_body="$3" pr_url
+  supersede_default_branch
   if [ "$PUSH" -eq 0 ]; then
     echo "--no-push: not pushing $branch or opening a PR. PR body written to $pr_body"
   elif ! command -v gh >/dev/null 2>&1; then
@@ -367,11 +438,16 @@ push_and_open_pr() {
     git -C "$WORK_DIR" push -u origin "$branch"
     echo "Setting gh default repo to $fork"
     (cd "$WORK_DIR" && gh repo set-default "$fork")
-    (cd "$WORK_DIR" && gh pr create \
+    if pr_url="$(cd "$WORK_DIR" && gh pr create \
       --base "$default_branch" \
       --head "$branch" \
       --title "$title" \
-      --body-file "$pr_body") \
-      || echo "PR creation failed — branch is still pushed. PR body is at $pr_body" >&2
+      --body-file "$pr_body")"; then
+      echo "$pr_url"
+      pr_url="$(tail -n1 <<<"$pr_url")"
+      close_superseded_prs "$pr_url"
+    else
+      echo "PR creation failed — branch is still pushed. PR body is at $pr_body" >&2
+    fi
   fi
 }

@@ -7,8 +7,12 @@ set -euo pipefail
 # the agent only to repair a conflicting patch, update one whose prompt has
 # changed, or implement a prompt that has no patch yet. Each feature becomes
 # one "Apply <prompt>" commit, whose patch is exported back into this repo.
-# Then runs the fork's check once, pushes, and opens a PR into the fork's
-# default branch. Exits 3 if everything ran but the check failed (the branch
+# New files under build-output directories (target/, node_modules/, a dir with
+# a CACHEDIR.TAG, ...) are never committed. Then runs the fork's check once,
+# merges the old default branch in with `-s ours` (tree unchanged) so the PR
+# is mergeable, pushes, opens a PR into the fork's default branch, and closes
+# the earlier nqaf-rebase-*/nqaf-rebuild-* PRs it supersedes. Land the PR with
+# scripts/merge-pr (a merge commit). Exits 3 if everything ran but the check failed (the branch
 # is still pushed and the PR opened), and 1 on any other error.
 
 ENGINE="claude"
@@ -75,7 +79,7 @@ done
 run_check
 
 pr_body="$(git -C "$WORK_DIR" rev-parse --absolute-git-dir)/nqaf-pr-body.md"
-write_pr_body "$pr_body" "Automated by \`scripts/re-apply\`: carries the fork's features forward onto upstream \`$upstream_head\`."
+write_pr_body "$pr_body" "Automated by \`scripts/re-apply\`: carries the fork's features forward onto upstream \`$upstream_head\`." "$branch"
 print_summary
 
 title="NQAF: carry fork forward onto upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")"

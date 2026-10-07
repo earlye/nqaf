@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Shared helpers: per-feature patch storage, local-file exclusion, and PR
 # attribution.
-# Sourced by scripts/apply, scripts/export-patches, scripts/re-apply and
-# scripts/rebuild.
+# Sourced by scripts/apply, scripts/export-patches, scripts/merge-pr,
+# scripts/re-apply and scripts/rebuild.
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -137,6 +137,108 @@ exclude_local_files() {
 # tracked copy is left for the user to remove from the fork.)
 unstage_local_files() {
   git -C "$1" reset -q -- .claude/settings.json 2>/dev/null || true
+}
+
+# Directory names that hold build output, never source: matched at any depth
+# by exclude_build_outputs (as gitignore patterns) and drop_build_outputs.
+BUILD_OUTPUT_DIRS=(target 'target-*' node_modules __pycache__ .venv)
+
+# is_build_output_name <dir-name> — true if <dir-name> matches BUILD_OUTPUT_DIRS.
+is_build_output_name() {
+  local pattern
+  for pattern in "${BUILD_OUTPUT_DIRS[@]}"; do
+    # shellcheck disable=SC2053  # glob match is intended
+    [[ "$1" == $pattern ]] && return 0
+  done
+  return 1
+}
+
+# exclude_build_outputs <work-dir> — (re)writes a marked block of
+# BUILD_OUTPUT_DIRS patterns in .git/info/exclude so `git add -A` skips build
+# output. A pattern is left out if HEAD already tracks a directory of that
+# name, so new files the agent adds there are not silently ignored (if they
+# are build output, drop_build_outputs still catches them).
+exclude_build_outputs() {
+  local work="$1" exclude_file pattern name tmp skip
+  local -a tracked
+  local begin='# nqaf build outputs (managed by scripts/lib/patches.sh)' end='# end nqaf build outputs'
+  exclude_file="$(git -C "$work" rev-parse --git-path info/exclude)"
+  case "$exclude_file" in /*) ;; *) exclude_file="$work/$exclude_file" ;; esac
+  mkdir -p "$(dirname "$exclude_file")"
+  touch "$exclude_file"
+  mapfile -t tracked < <(git -C "$work" ls-tree -r -d --name-only HEAD | awk -F/ '{ print $NF }' | sort -u)
+  tmp="$exclude_file.nqaf.$$"
+  {
+    awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$exclude_file"
+    echo "$begin"
+    for pattern in "${BUILD_OUTPUT_DIRS[@]}"; do
+      skip=0
+      for name in "${tracked[@]}"; do
+        # shellcheck disable=SC2053  # glob match is intended
+        [[ "$name" == $pattern ]] && { skip=1; break; }
+      done
+      if [ "$skip" -eq 1 ]; then
+        echo "Note: HEAD tracks a '$pattern' directory; not ignoring it (new files there are still filtered after staging)" >&2
+      else
+        echo "$pattern/"
+      fi
+    done
+    echo "$end"
+  } > "$tmp"
+  mv "$tmp" "$exclude_file"
+}
+
+# drop_build_outputs <work-dir> [<base>] — unstages newly-added files (staged,
+# absent from <base>, default HEAD) that live under a build-output directory:
+# one named in BUILD_OUTPUT_DIRS, or one holding a CACHEDIR.TAG (the
+# cache-directory spec, https://bford.info/cachedir/). A directory that
+# already exists in <base> is never treated as build output: upstream tracks
+# it. The files stay on disk, and each dropped directory is added to
+# .git/info/exclude so later `git add -A` runs skip it. Prints a warning per
+# directory; returns 0 whether or not anything was dropped.
+drop_build_outputs() {
+  local work="$1" base="${2:-HEAD}"
+  local path dir prefix comp exclude_file n
+  local -A verdict=() dropped=()
+  local -a comps
+
+  while IFS= read -r -d '' path; do
+    IFS=/ read -r -a comps <<<"$path"
+    prefix=""
+    for comp in "${comps[@]:0:${#comps[@]}-1}"; do
+      dir="${prefix:+$prefix/}$comp"
+      prefix="$dir"
+      if [ -z "${verdict[$dir]+x}" ]; then
+        verdict[$dir]=0
+        if ! git -C "$work" cat-file -e "$base:$dir" 2>/dev/null; then
+          if is_build_output_name "$comp" \
+             || [ -f "$work/$dir/CACHEDIR.TAG" ] \
+             || git -C "$work" cat-file -e ":$dir/CACHEDIR.TAG" 2>/dev/null; then
+            verdict[$dir]=1
+          fi
+        fi
+      fi
+      if [ "${verdict[$dir]}" -eq 1 ]; then
+        dropped[$dir]=$(( ${dropped[$dir]:-0} + 1 ))
+        break
+      fi
+    done
+  done < <(git -C "$work" diff --cached --name-only -z --no-renames --diff-filter=A "$base")
+
+  [ "${#dropped[@]}" -gt 0 ] || return 0
+  exclude_file="$(git -C "$work" rev-parse --git-path info/exclude)"
+  case "$exclude_file" in /*) ;; *) exclude_file="$work/$exclude_file" ;; esac
+  for dir in "${!dropped[@]}"; do
+    n="${dropped[$dir]}"
+    echo "Warning: not committing $n new file(s) under build-output directory $dir/" >&2
+    git -C "$work" rm -r -q --cached --ignore-unmatch -- "$dir"
+    grep -qxF "/$dir/" "$exclude_file" 2>/dev/null || echo "/$dir/" >> "$exclude_file"
+  done
+}
+
+# github_slug <git-url> — owner/repo for a github.com SSH or HTTPS URL.
+github_slug() {
+  sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##; s#/$##' <<<"$1"
 }
 
 # model_display <model-id> — human name for the PR attribution line.

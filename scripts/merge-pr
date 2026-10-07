@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Land an NQAF rebase/rebuild PR in a fork with a merge commit. The PR branch
+# ends in a `-s ours` merge of the old default branch, so a merge commit makes
+# upstream an ancestor of the default branch; squash or rebase would not, and
+# the next re-apply would rebuild needlessly.
+#
+# Forks usually allow squash only, or require linear history, so this:
+#   1. checks the PR is open, from the fork itself, MERGEABLE, and that its
+#      head already contains the base branch;
+#   2. snapshots the repo's allow_merge_commit, classic branch protection, and
+#      the repository rulesets that apply to the base branch;
+#   3. temporarily allows merge commits: sets allow_merge_commit, removes
+#      required_linear_history rules and adds "merge" to pull_request rules'
+#      allowed_merge_methods in repository rulesets;
+#   4. runs `gh pr merge --merge --delete-branch`;
+#   5. always (trap on EXIT/INT/TERM) restores every changed setting and
+#      re-reads it to verify, printing the manual fix command if that fails.
+# Classic branch protection with required linear history, and org-level
+# rulesets, are not changed (the API can only rewrite them wholesale); the
+# script refuses and says what to change by hand.
+#
+# --dry-run runs every read-only check and prints what would change.
+
+USAGE="Usage: merge-pr [--dry-run] <fork-dir> [<pr-number>]"
+DRY_RUN=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    *) echo "Unknown option: $1" >&2; echo "$USAGE" >&2; exit 1 ;;
+  esac
+done
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then echo "$USAGE" >&2; exit 1; fi
+FORK_DIR="${1%/}"
+PR="${2:-}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$ROOT_DIR/$FORK_DIR"
+
+# shellcheck source=lib/patches.sh
+source "$ROOT_DIR/scripts/lib/patches.sh"
+
+command -v gh >/dev/null 2>&1 || { echo "gh is required" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
+[ -f "$CONFIG_DIR/fork.txt" ] || { echo "$CONFIG_DIR/fork.txt not found; not a tracked fork" >&2; exit 1; }
+slug="$(github_slug "$(cat "$CONFIG_DIR/fork.txt")")"
+[[ "$slug" =~ ^[^/]+/[^/]+$ ]] || { echo "Can't parse a GitHub owner/repo from $CONFIG_DIR/fork.txt" >&2; exit 1; }
+echo "Fork repo: $slug"
+
+# ---- 1. Find and check the PR -------------------------------------------
+
+if [ -z "$PR" ]; then
+  mapfile -t candidates < <(gh pr list --repo "$slug" --state open --limit 100 \
+    --json number,headRefName,isCrossRepository \
+    --jq '.[] | select(.isCrossRepository | not) | select(.headRefName | test("^nqaf-(rebase|rebuild)-")) | "\(.number) \(.headRefName)"')
+  case "${#candidates[@]}" in
+    0) echo "No open nqaf-rebase-*/nqaf-rebuild-* PR in $slug" >&2; exit 1 ;;
+    1) PR="${candidates[0]%% *}" ;;
+    *) echo "More than one open nqaf-rebase-*/nqaf-rebuild-* PR in $slug; name one:" >&2
+       printf '  #%s\n' "${candidates[@]}" >&2
+       exit 1 ;;
+  esac
+fi
+[[ "$PR" =~ ^[0-9]+$ ]] || { echo "Not a PR number: $PR" >&2; exit 1; }
+
+refusals=()
+refuse() { refusals+=("$1"); echo "REFUSE: $1" >&2; }
+
+# GitHub computes mergeability lazily; UNKNOWN means "ask again shortly".
+for attempt in 1 2 3 4 5 6; do
+  pr_json="$(gh pr view "$PR" --repo "$slug" \
+    --json number,title,state,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,isCrossRepository,url)"
+  [ "$(jq -r .mergeable <<<"$pr_json")" != UNKNOWN ] && break
+  [ "$attempt" -lt 6 ] && { echo "Mergeability not computed yet; retrying..."; sleep 5; }
+done
+base="$(jq -r .baseRefName <<<"$pr_json")"
+head="$(jq -r .headRefName <<<"$pr_json")"
+head_sha="$(jq -r .headRefOid <<<"$pr_json")"
+echo "PR #$PR: $(jq -r .title <<<"$pr_json")"
+echo "  $(jq -r .url <<<"$pr_json")"
+echo "  $head ($head_sha) → $base; state $(jq -r .state <<<"$pr_json"), mergeable $(jq -r .mergeable <<<"$pr_json"), merge state $(jq -r .mergeStateStatus <<<"$pr_json")"
+
+[ "$(jq -r .state <<<"$pr_json")" = OPEN ] || refuse "PR #$PR is not open"
+[ "$(jq -r .isCrossRepository <<<"$pr_json")" = false ] || refuse "PR #$PR's head is in another repository"
+[[ "$head" =~ ^nqaf-(rebase|rebuild)- ]] \
+  || refuse "PR #$PR's head '$head' is not an nqaf-rebase-*/nqaf-rebuild-* branch"
+[ "$(jq -r .mergeable <<<"$pr_json")" = MERGEABLE ] \
+  || refuse "PR #$PR is not mergeable (mergeable=$(jq -r .mergeable <<<"$pr_json")); re-run scripts/re-apply or scripts/rebuild to get a branch that contains $base"
+behind="$(gh api "repos/$slug/compare/$base...$head_sha" --jq .behind_by 2>/dev/null || echo "?")"
+[ "$behind" = 0 ] \
+  || refuse "PR #$PR's head does not contain $base (behind by $behind); merging it would not supersede $base"
+
+# ---- 2. Snapshot settings and plan changes ------------------------------
+
+repo_json="$(gh api "repos/$slug")"
+orig_allow_merge="$(jq -r .allow_merge_commit <<<"$repo_json")"
+echo "Repo settings: allow_merge_commit=$orig_allow_merge allow_squash_merge=$(jq -r .allow_squash_merge <<<"$repo_json") allow_rebase_merge=$(jq -r .allow_rebase_merge <<<"$repo_json")"
+[ "$(jq -r '.permissions.admin // false' <<<"$repo_json")" = true ] \
+  || [ "$orig_allow_merge" = true ] \
+  || refuse "merge commits are disabled in $slug and you are not an admin, so they can't be enabled"
+
+# Classic branch protection: 404 means none.
+if prot_json="$(gh api "repos/$slug/branches/$base/protection" 2>/dev/null)"; then
+  if [ "$(jq -r '.required_linear_history.enabled // false' <<<"$prot_json")" = true ]; then
+    refuse "classic branch protection on $base requires linear history; this script does not rewrite classic protection. Untick 'Require linear history' at https://github.com/$slug/settings/branches, re-run, then tick it again"
+  else
+    echo "Branch protection on $base: present, no linear-history requirement"
+  fi
+else
+  # Distinguish "not protected" from other failures.
+  status="$(gh api "repos/$slug/branches/$base/protection" 2>&1 >/dev/null | sed -n 's/.*(HTTP \([0-9]*\)).*/\1/p' | head -n1 || true)"
+  case "$status" in
+    404) echo "Branch protection on $base: none" ;;
+    *) refuse "couldn't read branch protection on $base (HTTP ${status:-?}); not merging blind" ;;
+  esac
+fi
+
+# Rulesets: rules/branches lists every active rule that applies to $base,
+# with the ruleset it comes from.
+declare -a ruleset_ids=()
+if rules_json="$(gh api "repos/$slug/rules/branches/$base" --paginate 2>/dev/null)"; then
+  rules_json="$(jq -s 'add // []' <<<"$rules_json")"
+  blocking="$(jq -c '[.[] | select(.type == "required_linear_history"
+      or (.type == "pull_request" and ((.parameters.allowed_merge_methods // ["merge"]) | index("merge") | not)))]' <<<"$rules_json")"
+  while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    src_type="$(jq -r .ruleset_source_type <<<"$rule")"
+    rs_id="$(jq -r .ruleset_id <<<"$rule")"
+    echo "Ruleset $rs_id ($src_type $(jq -r .ruleset_source <<<"$rule")): $(jq -r .type <<<"$rule") rule blocks merge commits"
+    if [ "$src_type" != Repository ]; then
+      refuse "ruleset $rs_id is defined at the $src_type level; this script only changes repository rulesets"
+    elif [[ " ${ruleset_ids[*]} " != *" $rs_id "* ]]; then
+      ruleset_ids+=("$rs_id")
+    fi
+  done < <(jq -c '.[]' <<<"$blocking")
+  [ "$(jq length <<<"$blocking")" -gt 0 ] || echo "Rulesets: none block merge commits on $base"
+else
+  refuse "couldn't read the rules that apply to $base"
+fi
+
+# ---- 3. Plan -------------------------------------------------------------
+
+state_dir="$(mktemp -d "${TMPDIR:-/tmp}/nqaf-merge-pr.XXXXXX")"
+declare -a planned=()
+[ "$orig_allow_merge" = true ] || planned+=("set allow_merge_commit=true in $slug")
+
+# Original and relaxed rules for each ruleset to change.
+for rs_id in "${ruleset_ids[@]}"; do
+  gh api "repos/$slug/rulesets/$rs_id" > "$state_dir/ruleset-$rs_id.json"
+  jq '{rules: .rules}' "$state_dir/ruleset-$rs_id.json" > "$state_dir/ruleset-$rs_id.orig-rules.json"
+  jq '{rules: [.rules[]
+        | select(.type != "required_linear_history")
+        | if .type == "pull_request" and .parameters.allowed_merge_methods != null
+             and (.parameters.allowed_merge_methods | index("merge") | not)
+          then .parameters.allowed_merge_methods += ["merge"] else . end]}' \
+    "$state_dir/ruleset-$rs_id.json" > "$state_dir/ruleset-$rs_id.relaxed-rules.json"
+  planned+=("ruleset $rs_id ($(jq -r .name "$state_dir/ruleset-$rs_id.json")): drop required_linear_history / allow 'merge' in pull_request rules")
+done
+
+echo
+if [ "${#planned[@]}" -eq 0 ]; then
+  echo "Plan: no setting changes needed"
+else
+  echo "Plan: temporarily"
+  printf '  - %s\n' "${planned[@]}"
+fi
+echo "  - gh pr merge $PR --repo $slug --merge --delete-branch --match-head-commit $head_sha"
+[ "${#planned[@]}" -eq 0 ] || echo "  - restore every setting above, and verify"
+
+if [ "${#refusals[@]}" -gt 0 ]; then
+  echo
+  echo "Not merging: ${#refusals[@]} problem(s) above." >&2
+  rm -rf "$state_dir"
+  exit 1
+fi
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo
+  echo "--dry-run: nothing changed."
+  rm -rf "$state_dir"
+  exit 0
+fi
+
+# ---- 4. Change, merge, always restore -----------------------------------
+
+changed_allow_merge=0
+declare -a changed_rulesets=()
+
+restore() {
+  local status=$? failed=0 rs_id now
+  trap - EXIT INT TERM
+  set +e
+  if [ "$changed_allow_merge" -eq 1 ]; then
+    echo "Restoring allow_merge_commit=$orig_allow_merge"
+    gh api -X PATCH "repos/$slug" -F "allow_merge_commit=$orig_allow_merge" >/dev/null
+    now="$(gh api "repos/$slug" --jq .allow_merge_commit)"
+    if [ "$now" != "$orig_allow_merge" ]; then
+      failed=1
+      echo "!!!!! RESTORE FAILED: $slug allow_merge_commit is '$now', should be '$orig_allow_merge'. Fix with:" >&2
+      echo "!!!!!   gh api -X PATCH repos/$slug -F allow_merge_commit=$orig_allow_merge" >&2
+    fi
+  fi
+  for rs_id in "${changed_rulesets[@]}"; do
+    echo "Restoring ruleset $rs_id rules"
+    gh api -X PUT "repos/$slug/rulesets/$rs_id" --input "$state_dir/ruleset-$rs_id.orig-rules.json" >/dev/null
+    now="$(gh api "repos/$slug/rulesets/$rs_id" | jq -S '[.rules[] | {type, parameters}]')"
+    if [ "$now" != "$(jq -S '[.rules[] | {type, parameters}]' "$state_dir/ruleset-$rs_id.orig-rules.json")" ]; then
+      failed=1
+      echo "!!!!! RESTORE FAILED: ruleset $rs_id in $slug does not match its snapshot. Fix with:" >&2
+      echo "!!!!!   gh api -X PUT repos/$slug/rulesets/$rs_id --input $state_dir/ruleset-$rs_id.orig-rules.json" >&2
+    fi
+  done
+  if [ "$failed" -eq 1 ]; then
+    echo "!!!!! Snapshots kept in $state_dir" >&2
+    exit 2
+  fi
+  if [ "$changed_allow_merge" -eq 1 ] || [ "${#changed_rulesets[@]}" -gt 0 ]; then
+    echo "Settings restored and verified."
+  fi
+  rm -rf "$state_dir"
+  exit "$status"
+}
+trap restore EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$orig_allow_merge" != true ]; then
+  # Mark first: if the PATCH half-succeeds, restore still runs.
+  changed_allow_merge=1
+  echo "Enabling merge commits in $slug"
+  gh api -X PATCH "repos/$slug" -F allow_merge_commit=true >/dev/null
+fi
+for rs_id in "${ruleset_ids[@]}"; do
+  changed_rulesets+=("$rs_id")
+  echo "Relaxing ruleset $rs_id"
+  gh api -X PUT "repos/$slug/rulesets/$rs_id" --input "$state_dir/ruleset-$rs_id.relaxed-rules.json" >/dev/null
+done
+
+echo "Merging PR #$PR with a merge commit"
+gh pr merge "$PR" --repo "$slug" --merge --delete-branch --match-head-commit "$head_sha"
+echo "Merged PR #$PR into $base."
