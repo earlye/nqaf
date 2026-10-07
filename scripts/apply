@@ -71,6 +71,7 @@ cat > "$WORK_DIR/.claude/settings.json" <<'EOF'
 }
 EOF
 exclude_local_files "$WORK_DIR"
+exclude_build_outputs "$WORK_DIR"
 
 if [ "$#" -gt 0 ]; then
   prompts=("$@")
@@ -115,6 +116,7 @@ $(cat "$prompt")"
 
   git -C "$WORK_DIR" add -A
   unstage_local_files "$WORK_DIR"
+  drop_build_outputs "$WORK_DIR"
   if git -C "$WORK_DIR" diff --cached --quiet; then
     echo "No changes from $prompt_name; nothing to commit"
   else

@@ -8,8 +8,10 @@ set -euo pipefail
 # carries every prompt forward exactly as re-apply does (stored patch where it
 # applies cleanly, the agent otherwise). If the result's tree is identical to
 # the fork's default branch, it says so, restores patches/ and exits 0 without
-# pushing. Otherwise it prints the diff stat, runs the fork's check, pushes and
-# opens a PR into the default branch. Exits 3 if everything ran but the check
+# pushing. Otherwise it prints the diff stat, runs the fork's check, merges the
+# old default branch in with `-s ours`, pushes, opens a PR into the default
+# branch and closes the PRs it supersedes, exactly as re-apply does. Land the
+# PR with scripts/merge-pr. Exits 3 if everything ran but the check
 # failed (the branch is still pushed and the PR opened), and 1 on any other
 # error.
 
@@ -82,7 +84,7 @@ git -C "$WORK_DIR" --no-pager diff --stat origin/HEAD HEAD
 run_check
 
 pr_body="$(git -C "$WORK_DIR" rev-parse --absolute-git-dir)/nqaf-pr-body.md"
-write_pr_body "$pr_body" "Automated by \`scripts/rebuild\`: rebuilds the fork's features on upstream \`$upstream_head\`; the result differs from \`$default_branch\`."
+write_pr_body "$pr_body" "Automated by \`scripts/rebuild\`: rebuilds the fork's features on upstream \`$upstream_head\`; the result differs from \`$default_branch\`." "$branch"
 print_summary
 
 title="NQAF: rebuild fork on upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")"
