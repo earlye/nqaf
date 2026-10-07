@@ -26,3 +26,4 @@ appear in the UI, and where downloaded songs are stored.
 ### 2026-10-07
 
 - Q: Which online source, and what counts as "a song" (USDB `.txt` charts only, charts plus yt-dlp media, CC archive packs from a curated index, or shell out to USDB Syncer)? — A: None of those as the core. Build an open, MIT-licensed song-distribution **protocol** with a reference server and a reference client; Performous embeds the client and is configured with a list of servers. Legality of content then sits with whoever runs a server, not with Performous or the protocol. The original inspiration was rhythmverse.co (https://rhythmverse.co/songfiles/game), not USDB.
+- Q: Where does the protocol suite live: a standalone repo, inside the Performous fork, or inside nqaf? — A: A standalone component suite in a new repo, tentatively `github.com/earlye/rg-song-finder`; the final name is still open. Performous embedding the client becomes an nqaf fork feature for `performous`.
