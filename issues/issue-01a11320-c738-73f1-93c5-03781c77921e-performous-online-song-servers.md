@@ -66,3 +66,7 @@ existing torrent client without games changing.
 - Q: What identifies an entry? — A: A UUIDv7, unique across the whole catalog and never reused.
 - Q: What happens if an entry ID appears twice in one catalog? — A: The fetcher warns, and the newer entry wins. (What "newer" means is the next question.)
 - Q: What does one download deliver: a single song, or a pack of many? — A: Only single songs. One entry is one song. Packs as single downloads are rejected: per-song entries let the fetcher download many songs at once, from different mirrors, rather than pulling one big archive.
+
+### 2026-10-14
+
+- Q: When an ID is duplicated, what does "newer" mean: position in the shards, an update timestamp, or a revision counter? — A: An update timestamp. Every record has at least `{"id": <uuidv7>, "last-update": <ISO 8601 timestamp>, ...}`, and the larger `last-update` wins.
