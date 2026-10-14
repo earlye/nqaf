@@ -70,3 +70,4 @@ existing torrent client without games changing.
 ### 2026-10-14
 
 - Q: When an ID is duplicated, what does "newer" mean: position in the shards, an update timestamp, or a revision counter? — A: An update timestamp. Every record has at least `{"id": <uuidv7>, "last-update": <ISO 8601 timestamp>, ...}`, and the larger `last-update` wins.
+- Pivot (replaces the `last-update` answer above and the earlier "duplicate ID warns, newer wins" answer): there is no "newer wins". Records are **versions**. A record is at least `{"id": <uuidv7>, "version": <uuidv7>, ...}`. `id` identifies the song; `version` identifies one release of it. Every version of a song is visible to the user, whether it comes from the same catalog or from different ones, and the user picks. The same `id` in different catalogs means the same song. If two catalogs publish the same `(id, version)` with different contents, the catalog is added to the key to tell them apart.
