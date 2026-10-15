@@ -1,51 +1,83 @@
-# performous: search and download songs from online song servers
+# performous: search and download songs via the firkin CLI
 
 ## Context
 
-Wanted: Performous can search online song servers and download songs
+Wanted: Performous can search online song catalogs and download songs
 from them, instead of the user finding song packages and copying them
 into a songs directory by hand.
 
+This is done through **firkin**
+(`issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md`,
+to live at `firkin-media/firkin`). firkin is a standalone, MIT-licensed
+Rust tool for selective media sync. Its CLI is the integration contract
+for host apps. How Performous uses it:
+
+- **Search:** Performous runs `firkin` and reads JSON results. It
+  filters on the `rhythm-game/song@1` `charts` field for formats it can
+  play: UltraStar `.txt`, Frets on Fire `song.ini` + `notes.mid`,
+  StepMania `.sm`, SingStar `notes.xml`. It can't play Clone Hero
+  `notes.chart`.
+- **Fetch:** Performous runs `firkin` to fetch a pinned song into a
+  configured songs directory and reads JSON-lines progress on stdout.
+  When the fetch completes, it calls `Songs::reload()`.
+- **No networking in Performous.** It needs no HTTP client, BitTorrent,
+  or link-time dependency on firkin. Choosing catalogs, following
+  references and pinning all happen in firkin.
+
 Performous is tracked in nqaf: upstream `performous/performous`
 (`performous/upstream.txt`), fork `earlye-forks/performous`
-(`performous/fork.txt`). Fork features are written as prompts under
-`performous/prompts/`; `feature-000` (README fork notice) and
-`feature-001` (fork-local macOS DMG workflow) exist so far. This would
-likely land as a new feature prompt there.
+(`performous/fork.txt`). This work becomes nqaf fork feature
+`performous/prompts/feature-002.md`, following `feature-000` (README
+fork notice) and `feature-001` (fork-local macOS DMG workflow).
 
-Not yet decided: which song servers to support, how search and download
-appear in the UI, and where downloaded songs are stored.
+Related upstream issues:
+
+- performous#4 "Content distribution over torrent" (open)
+- performous#551 "download audio/video from youtube" (open, contested
+  on legality)
 
 ## Relevant files
 
-- `performous/prompts/feature-000.md`, `performous/prompts/feature-001.md` — existing fork feature prompts; a new one would follow their shape
-- `performous/upstream.txt`, `performous/fork.txt` — the upstream and fork repos
+Performous references are from upstream master `947b1be`
+(2026-08-31).
 
-## Draft ADR for the new repo
+- **`game/songs.cc`**
+  - `:68-78`: `Songs::reload()` starts a background rescan (an mtime
+    cache plus a full-library walk). There is no add-one-song API.
+  - `:291`: the scan filter regex,
+    `(\.txt|^song\.ini|^notes\.xml|\.sm)$`.
+  - `:311`: skips `._*` and `.#*` junk files.
+- **`data/config/schema.xml:449-469`**: the `paths/songs` (user) and
+  `paths/system-songs` (defaults) song directories.
+- **`game/screen_songs.cc:164-165`**: Ctrl/Cmd+R rescans the library.
+- **`game/songparser.cc:77-92`**: format sniffing order (SingStar XML,
+  StepMania, UltraStar, Frets on Fire `song.ini`).
+- **`game/CMakeLists.txt:189-228`**: `ENABLE_WEBSERVER` AUTO/ON/OFF.
+  This is the precedent if firkin integration becomes an optional build
+  feature.
+- **nqaf files:**
+  - `performous/prompts/feature-000.md`, `performous/prompts/feature-001.md`:
+    existing fork feature prompts, which the new one follows.
+  - `performous/upstream.txt`, `performous/fork.txt`: the upstream and
+    fork repos.
 
-To be copied to `docs/adr/0001-fetcher-cli-is-the-contract.md` in the protocol suite repo once it exists.
+## Blocked by
 
-```md
-# Host games shell out to the fetcher CLI instead of embedding a library
+- `issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md`
+  (firkin v1: the CLI contract, the catalog format, the
+  `rhythm-game/song@1` type)
 
-Host games (Performous first) integrate by running the fetcher CLI for
-search and download and reading its JSON-lines progress on stdout. They
-do not link a client library. This keeps networking, BitTorrent, and the
-legal surface of fetching content out of every game. It lets the fetcher
-be written in Rust regardless of the game's language and license, and it
-lets the fetcher later hand downloads to a resident service or an
-existing torrent client without games changing.
+## Open questions
 
-## Considered Options
-
-- **Embedded client library**: rejected. Every game would carry an HTTP
-  stack, and possibly libtorrent, in its own language and build system.
-  Performous has no HTTP client today.
-- **Message queue to a resident downloader service as the contract**:
-  not rejected outright, just kept behind the CLI. It needs an installed,
-  running, discoverable service before a game can do anything. The CLI
-  can start delegating to such a service later.
-```
+- **UI:** search, browse, pin, and upgrade-available prompts in
+  Performous. Alternatively, Performous could defer browsing to a
+  firkin UI.
+- **Install target:** which songs directory firkin installs into. It
+  could be a dedicated entry in `paths/songs`, or a new default.
+- **Finding the binary:** how Performous locates the `firkin` binary,
+  and how it behaves when firkin is absent.
+- **Build vs runtime:** whether integration is an optional build
+  feature (like `ENABLE_WEBSERVER`), detected at runtime, or both.
 
 ## Grill Log
 
@@ -98,3 +130,4 @@ existing torrent client without games changing.
 - Q: What is the string form of an artifact identifier? — A: The fragment form: `<root-url>#path=<catalog-path>&id=<uuid>&version=<uuid>&hash=sha256:<hex>`, with values percent-encoded. The fragment is never sent to a git server and isn't part of a magnet link's meaning, so one rule covers git, magnet and `.torrent` roots. `path` only helps locate the record and isn't part of identity. Partial forms are allowed for lookup (e.g. `<root-url>#id=<uuid>` means the latest version from that catalog); pins carry every key. For OS and browser link handling, a custom-scheme wrapper goes in front: `<scheme>:https://...#id=...` or `<scheme>:magnet:?xt=...#path=...&id=...`. The scheme name is pending the project name.
 - Q: What is the project called? (Detour; candidates checked against crates.io, GitHub, IANA and notable products: larder, medialoom, yameta, ferro, ferrum, ferra, ferrarum, ferri, ferrata, ferreus, ferry, skiff, junk, amphora, lading, firkin, hogshead, cask, bale.) — A: **firkin**. Rust crates use the `firkin-media` prefix (the bare `firkin` crate is a small containerization library; no transfer will be requested). `firkin-media-cli` installs the `firkin` binary. URI schemes are `firkin:` and `web+firkin:` (browsers only allow web pages to register `web+`-prefixed schemes). The file extension is `.firkin`. GitHub org: https://github.com/firkin-media, which replaces the tentative `earlye/rg-song-finder`. "Fetcher" / "syncer" in earlier answers now means `firkin`.
 - Q: Keep grilling here, or consolidate and split the firkin design out of this Performous issue? — A: Consolidate and split. The firkin design gets its own document, to seed the repo `firkin-media/firkin`. This issue narrows to "Performous embeds the `firkin` CLI", blocked by firkin v1. Overall view of firkin: "an app that knows all media, selectively syncs it to/from your machine, and provides an integration mechanism for other apps."
+- Consolidated: firkin design split out to issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md; this issue narrowed to the Performous integration.
