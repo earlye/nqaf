@@ -1,0 +1,299 @@
+From 8b6b0c1d07ba00e8f2da67b09ba6707320ccf4cf Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Thu, 15 Oct 2026 00:58:27 +0000
+Subject: [PATCH] Apply feature-001.md
+
+---
+ .nqaf/prompts/feature-001.md                  | 48 ++++++++++++++++++
+ earlye-fork.md                                |  2 +
+ .../apps/artcraft/app/src/pages/MainApp.tsx   |  4 +-
+ .../login-modal/src/lib/login-modal.spec.tsx  | 49 +++++++++++++++++++
+ .../login-modal/src/lib/login-modal.tsx       | 49 +++++++++++++++----
+ .../AccountSettings/ArtcraftAccountBlock.tsx  |  6 +--
+ 6 files changed, 143 insertions(+), 15 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-001.md
+
+diff --git a/.nqaf/prompts/feature-001.md b/.nqaf/prompts/feature-001.md
+new file mode 100644
+index 0000000..e72e91e
+--- /dev/null
++++ b/.nqaf/prompts/feature-001.md
+@@ -0,0 +1,48 @@
++# Remove the startup login gate
++
++## Problem [feature-001]
++
++On launch, ArtCraft forces a sign-up/login modal that cannot be dismissed.
++The project is MIT/Apache licensed, and much of the app (local canvas, 3D
++scene, video editor, moodboard, and generation through bring-your-own-key
++providers such as Fal) does not need an ArtCraft account. A user should be
++able to use the app without signing up.
++
++As of this writing the gate lives in the login modal component
++(`frontend/libs/components/login-modal/src/lib/login-modal.tsx`):
++
++- A `useEffect` keyed on the store's `recheckTrigger` calls
++  `getNativeLoginSession()` and, when there is no session (null or error),
++  calls `useLoginModalStore.getState().openModal()`.
++- The modal has no dismiss control (the backdrop has no click handler, and a
++  comment says "no dismiss control — login is required").
++
++`MainApp.tsx` mounts `<LoginModal>` unconditionally. Routing is not a gate:
++`withProtectedRoute` already renders unconditionally.
++
++## Fix
++
++- Do not auto-open the login modal when the startup session check finds no
++  session. The session check itself should still run, so an existing
++  session is still picked up and the logged-in state is set as before.
++- The modal should still open when the user explicitly asks to log in (the
++  TopBar login/sign-up button, the account block in settings, the gallery
++  login button, and any other existing explicit entry points).
++- Make the modal dismissible: add a visible close / "Continue without an
++  account" control, and let Escape and backdrop clicks close it, using the
++  component's existing close handler.
++- Update any existing tests (for example `login-modal.spec.tsx`) that
++  assert the old auto-open behaviour, and add a test that a missing session
++  does not open the modal. Run the affected frontend tests.
++
++Do not remove login, the hosted ArtCraft provider, billing/credits, or the
++cloud features. Logged-in behaviour should be unchanged. Do not change the
++default generation provider or add new offline/local modes.
++
++Add a bullet to the `## Differences from upstream` section of
++`earlye-fork.md` (create the file with that section if it doesn't exist):
++`feature-001` — the login modal no longer opens automatically at startup
++and can be dismissed; features that need an ArtCraft account still prompt
++for login.
++
++Do not make any other changes.
+diff --git a/earlye-fork.md b/earlye-fork.md
+index 6196687..ee2d4f5 100644
+--- a/earlye-fork.md
++++ b/earlye-fork.md
+@@ -8,3 +8,5 @@ prompt history for the prompts themselves.
+ ## Differences from upstream
+ 
+ - `feature-000` — adds this file and the fork notice in `README.md`.
++- `feature-001` — the login modal no longer opens automatically at startup and can be
++  dismissed; features that need an ArtCraft account still prompt for login.
+diff --git a/frontend/apps/artcraft/app/src/pages/MainApp.tsx b/frontend/apps/artcraft/app/src/pages/MainApp.tsx
+index b35bebd..074583e 100644
+--- a/frontend/apps/artcraft/app/src/pages/MainApp.tsx
++++ b/frontend/apps/artcraft/app/src/pages/MainApp.tsx
+@@ -159,7 +159,7 @@ export const MainApp = ({ sceneToken }: Props) => {
+     });
+   }, []);
+ 
+-  const { triggerRecheck } = useLoginModalStore();
++  const { openModal: openLoginModal } = useLoginModalStore();
+   const { isOpen: isCreditsOpen, closeModal: closeCreditsModal } =
+     useCreditsModalStore();
+   const disableHotkeyInput = usePageSceneStore((s) => s.disableHotkeyInput);
+@@ -172,7 +172,7 @@ export const MainApp = ({ sceneToken }: Props) => {
+       <TopBar
+         loginSignUpPressed={() => {
+           console.log("PRESSED");
+-          triggerRecheck();
++          openLoginModal();
+         }}
+         pageName="Edit Scene"
+       />
+diff --git a/frontend/libs/components/login-modal/src/lib/login-modal.spec.tsx b/frontend/libs/components/login-modal/src/lib/login-modal.spec.tsx
+index dcffc9a..9b84fc0 100644
+--- a/frontend/libs/components/login-modal/src/lib/login-modal.spec.tsx
++++ b/frontend/libs/components/login-modal/src/lib/login-modal.spec.tsx
+@@ -180,3 +180,52 @@ describe("native login modal integration", () => {
+     expect(screen.queryByRole("heading", { name: "Logged in as google_user" })).toBeNull();
+   });
+ });
++
++describe("optional login", () => {
++  beforeEach(() => { useLoginModalStore.setState({ isOpen: false, recheckTrigger: 0 }); });
++
++  it.each([
++    ["no session", async () => null],
++    ["a failed session check", async () => { throw new Error("offline"); }],
++  ])("does not open the modal at startup with %s", async (_label, session) => {
++    native.mockImplementationOnce(session);
++    const success = vi.fn();
++    await act(async () => { render(<LoginModal onArtCraftAuthSuccess={success} />); });
++    expect(native).toHaveBeenCalledWith("storyteller_get_login_session_command");
++    expect(useLoginModalStore.getState().isOpen).toBe(false);
++    expect(screen.queryByText("Create your account")).toBeNull();
++    expect(success).not.toHaveBeenCalled();
++    await act(async () => { useLoginModalStore.getState().triggerRecheck(); });
++    expect(useLoginModalStore.getState().isOpen).toBe(false);
++  });
++
++  it("opens on an explicit request", async () => {
++    await act(async () => { render(<LoginModal />); });
++    await act(async () => { useLoginModalStore.getState().openModal(); });
++    expect(screen.getByText("Create your account")).toBeTruthy();
++  });
++
++  it.each([
++    ["the close button", () => fireEvent.click(screen.getByRole("button", { name: "Close" }))],
++    ["continue without an account", () => fireEvent.click(screen.getByRole("button", { name: "Continue without an account" }))],
++    ["Escape", () => fireEvent.keyDown(window, { key: "Escape" })],
++    ["a backdrop click", () => fireEvent.click(screen.getByText("Create your account").closest(".fixed.inset-0.flex")!)],
++  ])("dismisses via %s", async (_label, dismiss) => {
++    const onClose = vi.fn();
++    await act(async () => { render(<LoginModal onClose={onClose} />); });
++    await act(async () => { useLoginModalStore.getState().openModal(); });
++    await act(async () => { dismiss(); });
++    expect(useLoginModalStore.getState().isOpen).toBe(false);
++    expect(screen.queryByText("Create your account")).toBeNull();
++    expect(onClose).toHaveBeenCalledTimes(1);
++  });
++
++  it("stays open on clicks inside the card", async () => {
++    const onClose = vi.fn();
++    await act(async () => { render(<LoginModal onClose={onClose} />); });
++    await act(async () => { useLoginModalStore.getState().openModal(); });
++    fireEvent.click(screen.getByText("Create your account"));
++    expect(useLoginModalStore.getState().isOpen).toBe(true);
++    expect(onClose).not.toHaveBeenCalled();
++  });
++});
+diff --git a/frontend/libs/components/login-modal/src/lib/login-modal.tsx b/frontend/libs/components/login-modal/src/lib/login-modal.tsx
+index b9c24bb..e6c5342 100644
+--- a/frontend/libs/components/login-modal/src/lib/login-modal.tsx
++++ b/frontend/libs/components/login-modal/src/lib/login-modal.tsx
+@@ -1,7 +1,7 @@
+ import { Button } from "@storyteller/ui-button";
+ import { Transition, TransitionChild } from "@headlessui/react";
+-import { useState, useEffect, useRef } from "react";
+-import { ArrowRightIcon } from "lucide-react";
++import { useState, useEffect, useRef, useCallback } from "react";
++import { ArrowRightIcon, XIcon } from "lucide-react";
+ import { DiscordIcon } from "@storyteller/icons";
+ import type { UserInfo } from "@storyteller/api";
+ import { DesktopLoginBridge } from "./DesktopLoginBridge";
+@@ -57,7 +57,9 @@ export function LoginModal({
+   const afterClose = useRef(onClose);
+   afterClose.current = onClose;
+ 
+-  // A stale startup/recheck response must never reopen the modal after login.
++  // Picks up an existing session at startup/recheck. A missing session does not
++  // open the modal; it only opens on explicit requests (openModal). A stale
++  // response must never reopen the modal after login.
+   useEffect(() => {
+     const generation = ++authGeneration.current;
+     let active = true;
+@@ -75,12 +77,10 @@ export function LoginModal({
+         setShowSuccess(false);
+         setLoggedInUsername(null);
+         setIsLoggedInArtCraft(false);
+-        useLoginModalStore.getState().openModal();
+       }
+     }).catch((error) => {
+       if (!active || generation !== authGeneration.current) return;
+       setErrorMessage(isDesktopLoginError(error) ? error.message : "Unable to check your account. Please sign in again.");
+-      useLoginModalStore.getState().openModal();
+     });
+     return () => { active = false; };
+   }, [recheckTrigger, closeModal, initialIsSignUp]);
+@@ -98,10 +98,19 @@ export function LoginModal({
+     return () => window.clearTimeout(timer);
+   }, [loggedInUsername, isOpen, closeModal]);
+ 
+-  const handleClose = () => {
++  const handleClose = useCallback(() => {
+     closeModal();
+-    onClose?.();
+-  };
++    afterClose.current?.();
++  }, [closeModal]);
++
++  useEffect(() => {
++    if (!isOpen) return;
++    const onKeyDown = (e: KeyboardEvent) => {
++      if (e.key === "Escape") handleClose();
++    };
++    window.addEventListener("keydown", onKeyDown);
++    return () => window.removeEventListener("keydown", onKeyDown);
++  }, [isOpen, handleClose]);
+ 
+   const handleDiscordJoin = () => {
+     window.open("https://discord.gg/75svZP2Vje", "_blank");
+@@ -219,7 +228,10 @@ export function LoginModal({
+         >
+           <div className="fixed inset-0 cursor-pointer bg-black/80" />
+         </TransitionChild>
+-        <div className="fixed inset-0 flex items-center justify-center p-4">
++        <div
++          className="fixed inset-0 flex items-center justify-center p-4"
++          onClick={handleClose}
++        >
+           <TransitionChild
+             enter="ease-out duration-300"
+             enterFrom="opacity-0 scale-95"
+@@ -232,6 +244,14 @@ export function LoginModal({
+               className={`relative w-full ${loggedInUsername !== null ? "max-w-md" : "max-w-lg lg:max-w-5xl"}`}
+               onClick={(e) => e.stopPropagation()}
+             >
++              <button
++                type="button"
++                onClick={handleClose}
++                aria-label="Close"
++                className="absolute right-3 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-[3px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
++              >
++                <XIcon className="h-4 w-4" />
++              </button>
+               <div
+                 className={`relative flex w-full overflow-hidden border border-white/20 bg-[#1e1f22] text-white ${loggedInUsername !== null ? "" : "lg:min-h-[560px]"}`}
+               >
+@@ -241,7 +261,7 @@ export function LoginModal({
+                   renderOnboarding()
+                 ) : (
+                   <>
+-                    {/* ── Form pane ── (no dismiss control — login is required) */}
++                    {/* ── Form pane ── */}
+                     <div className="relative flex w-full flex-col lg:w-1/2">
+                       <div className="flex flex-1 flex-col justify-center px-6 py-10 sm:px-10 sm:py-12">
+                         <div className="w-full">
+@@ -284,6 +304,15 @@ export function LoginModal({
+                             errorMessage={errorMessage}
+                             isLoading={isLoading}
+                           />}
++                          <div className="mt-6 text-center">
++                            <button
++                              type="button"
++                              onClick={handleClose}
++                              className="font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-white/50 transition-colors hover:text-white"
++                            >
++                              Continue without an account
++                            </button>
++                          </div>
+                         </div>
+                       </div>
+ 
+diff --git a/frontend/libs/components/settings-modal/src/lib/panes/AccountSettings/ArtcraftAccountBlock.tsx b/frontend/libs/components/settings-modal/src/lib/panes/AccountSettings/ArtcraftAccountBlock.tsx
+index c0dbf3c..0c27471 100644
+--- a/frontend/libs/components/settings-modal/src/lib/panes/AccountSettings/ArtcraftAccountBlock.tsx
++++ b/frontend/libs/components/settings-modal/src/lib/panes/AccountSettings/ArtcraftAccountBlock.tsx
+@@ -16,7 +16,7 @@ export interface ArtcraftAccountBlockProps {
+ export const ArtcraftAccountBlock = ({
+   globalAccountLogoutCallback,
+ }: ArtcraftAccountBlockProps) => {
+-  const { triggerRecheck } = useLoginModalStore();
++  const { triggerRecheck, openModal } = useLoginModalStore();
+   const [artcraftSession, setArtcraftSession] = useState<UserInfo | undefined>(
+     undefined
+   );
+@@ -54,12 +54,12 @@ export const ArtcraftAccountBlock = ({
+       globalAccountLogoutCallback(); // TODO: This resets the old global application state
+ 
+ 
+-      triggerRecheck(); // Trigger modal to recheck session and potentially open
++      triggerRecheck(); // Recheck the session; the login modal stays closed
+ 
+       await invoke("storyteller_purge_credentials_command");
+ 
+     } else {
+-      triggerRecheck(); // Open login modal instead of redirecting
++      openModal(); // Open login modal instead of redirecting
+     }
+   };
+ 

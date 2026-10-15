@@ -1,0 +1,89 @@
+From 658301c8e4d91a15fb24922f019861f00df0ff8c Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@gmail.com>
+Date: Thu, 15 Oct 2026 00:55:05 +0000
+Subject: [PATCH] Apply feature-000.md
+
+---
+ .nqaf/prompts/feature-000.md | 40 ++++++++++++++++++++++++++++++++++++
+ README.md                    |  3 +++
+ earlye-fork.md               | 10 +++++++++
+ 3 files changed, 53 insertions(+)
+ create mode 100644 .nqaf/prompts/feature-000.md
+ create mode 100644 earlye-fork.md
+
+diff --git a/.nqaf/prompts/feature-000.md b/.nqaf/prompts/feature-000.md
+new file mode 100644
+index 0000000..ccf0436
+--- /dev/null
++++ b/.nqaf/prompts/feature-000.md
+@@ -0,0 +1,40 @@
++# Bootstrap: mark this repo as a fork tracked via NQAF
++
++## Problem [feature-000]
++
++This repo (`fork.txt`) is a straight mirror of `upstream.txt`
++(`storytold/artcraft`) with no indication in the repo itself that it
++carries locally-applied changes, or where to find them.
++
++## Fix
++
++Add a short fork notice near the top of `README.md`: after the centered
++intro block (the title, tagline, demo video, social badges, and the
++"Download ArtCraft · GitHub releases · Build from source" links row), and
++before the next section. Match the README's existing style. State:
++
++- This repository is a fork of the upstream project (link to
++  `https://github.com/storytold/artcraft`).
++- It carries a small set of fork-local changes applied on top of upstream,
++  tracked as prompts rather than as a diverging code history.
++- For how this fork differs from upstream, see
++  [`earlye-fork.md`](./earlye-fork.md).
++
++Create `earlye-fork.md` at the repo root containing:
++
++- A one-paragraph explanation that this is a fork of
++  `https://github.com/storytold/artcraft`, maintained by re-applying a set
++  of change prompts on top of upstream (do not hardcode a path to the
++  `nqaf` repo — just say "see the fork's NQAF prompt history").
++- A `## Differences from upstream` section with one bullet per fork-local
++  change. Add only this change's bullet: `feature-000` — adds this file and
++  the fork notice in `README.md`. Later prompts add their own bullets.
++
++Do not change the existing README links (download, releases, Discord,
++etc.), which point at upstream, or any app/packaging metadata
++(`tauri.conf.json` identifiers, `Cargo.toml`/`package.json` names,
++repository/homepage fields, updater endpoints). This fork is not published
++under a new name, so rewriting that metadata would be speculative scope
++creep.
++
++Do not make any other changes.
+diff --git a/README.md b/README.md
+index 26fe959..0bef0dc 100644
+--- a/README.md
++++ b/README.md
+@@ -23,6 +23,9 @@ https://github.com/user-attachments/assets/7339bd09-3e0d-44a7-a024-af9de64e4c11
+   <a href="./_docs/dev_setup.md">Build from source</a>
+ </p>
+ 
++> [!NOTE]
++> This repository is a fork of [storytold/artcraft](https://github.com/storytold/artcraft). It carries a small set of fork-local changes applied on top of upstream, tracked as prompts rather than as a diverging code history. For how this fork differs from upstream, see [`earlye-fork.md`](./earlye-fork.md).
++
+ ArtCraft is the IDE for interactive AI image and video creation. Compose in 2D, stage scenes in 3D, and choose the models that fit your work. Turn prompting into *crafting* with visual tools for precise, repeatable results.
+ 
+ ## Show, Don't Tell: Advanced Crafting Features
+diff --git a/earlye-fork.md b/earlye-fork.md
+new file mode 100644
+index 0000000..6196687
+--- /dev/null
++++ b/earlye-fork.md
+@@ -0,0 +1,10 @@
++# earlye fork of ArtCraft
++
++This repository is a fork of [storytold/artcraft](https://github.com/storytold/artcraft).
++Rather than maintaining a diverging code history, the fork is maintained by
++re-applying a set of change prompts on top of upstream; see the fork's NQAF
++prompt history for the prompts themselves.
++
++## Differences from upstream
++
++- `feature-000` — adds this file and the fork notice in `README.md`.
