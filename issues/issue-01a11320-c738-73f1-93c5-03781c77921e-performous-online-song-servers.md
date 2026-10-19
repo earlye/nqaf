@@ -1,5 +1,15 @@
 # performous: search and download songs via the firkin CLI
 
+## Update 2026-10-19
+
+**Update 2026-10-19 (from the firkin v1 design grill, firkin-media/firkin `issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md`):**
+The direction of integration is reversed. Performous no longer calls firkin. **firkin launches Performous** through a wrapper (`firkin-wrapper-performous`). ADR 0001, "host apps shell out to the firkin CLI", is superseded by firkin ADR 0004. The Performous work is now:
+1. **A "play these songs, then exit" mode.** Performous already accepts song directories as repeatable positional args (`game/main.cc`, the `songdir` option). What's missing is starting the given song immediately and exiting when it's done.
+2. **Score output** that the wrapper can read and report back to firkin: song total, per-performer totals, percent of notes hit, extra notes. The format is to be decided with the wrapper.
+3. **Startup trimming** in the fork, so launching once per song or per set is fast.
+
+**Rejected:** an in-game firkin song browser plus JSON-lines CLI integration inside Performous. It's a large patch that duplicates a library manager in every player. firkin is now the library: browsing, search, download and p2p.
+
 ## Context
 
 Wanted: Performous can search online song catalogs and download songs
@@ -131,3 +141,7 @@ Performous references are from upstream master `947b1be`
 - Q: What is the project called? (Detour; candidates checked against crates.io, GitHub, IANA and notable products: larder, medialoom, yameta, ferro, ferrum, ferra, ferrarum, ferri, ferrata, ferreus, ferry, skiff, junk, amphora, lading, firkin, hogshead, cask, bale.) — A: **firkin**. Rust crates use the `firkin-media` prefix (the bare `firkin` crate is a small containerization library; no transfer will be requested). `firkin-media-cli` installs the `firkin` binary. URI schemes are `firkin:` and `web+firkin:` (browsers only allow web pages to register `web+`-prefixed schemes). The file extension is `.firkin`. GitHub org: https://github.com/firkin-media, which replaces the tentative `earlye/rg-song-finder`. "Fetcher" / "syncer" in earlier answers now means `firkin`.
 - Q: Keep grilling here, or consolidate and split the firkin design out of this Performous issue? — A: Consolidate and split. The firkin design gets its own document, to seed the repo `firkin-media/firkin`. This issue narrows to "Performous embeds the `firkin` CLI", blocked by firkin v1. Overall view of firkin: "an app that knows all media, selectively syncs it to/from your machine, and provides an integration mechanism for other apps."
 - Consolidated: firkin design split out to issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md; this issue narrowed to the Performous integration.
+
+### 2026-10-19
+
+- Update: the firkin v1 design grill reversed the integration direction; firkin launches Performous through `firkin-wrapper-performous`. See "Update 2026-10-19" at the top of this file.
