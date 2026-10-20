@@ -1,4 +1,4 @@
-From 67f54e8922d359ccf7964e95bd3ae41164631e1d Mon Sep 17 00:00:00 2001
+From dffdd20c82c43bc6a05968d9a8dc26c3f0d918e8 Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@gmail.com>
 Date: Tue, 6 Oct 2026 19:04:05 +0000
 Subject: [PATCH] Apply feature-001.md
@@ -446,7 +446,7 @@ index 0dc78a125..903a00491 100644
          Ok(turso_core::io::FileId::from_path_hash(path))
      }
 diff --git a/core/database.rs b/core/database.rs
-index c482e6e84..308bfd3ef 100644
+index 9422911a3..bf3d89757 100644
 --- a/core/database.rs
 +++ b/core/database.rs
 @@ -80,6 +80,7 @@ pub struct DatabaseOpts {
@@ -500,7 +500,7 @@ index c482e6e84..308bfd3ef 100644
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub enum SharedWalCoordinationOpenTelemetryMode {
      Exclusive,
-@@ -407,6 +438,7 @@ pub(crate) enum InitState {
+@@ -408,6 +439,7 @@ pub(crate) enum InitState {
  /// [`OpenDbAsyncPhase::ValidatingHeader`]. Keeps WAL recovery on open
  /// non-blocking by yielding through its IO instead of `io.block`.
  enum HeaderValidationState {
@@ -508,7 +508,7 @@ index c482e6e84..308bfd3ef 100644
      Start {
          init: InitState,
      },
-@@ -445,12 +477,47 @@ enum HeaderValidationState {
+@@ -446,12 +478,47 @@ enum HeaderValidationState {
  
  impl Default for HeaderValidationState {
      fn default() -> Self {
@@ -559,7 +559,7 @@ index c482e6e84..308bfd3ef 100644
  /// How `Database::_connect` loads the connection's ANALYZE stats.
  ///
  /// A new connection starts from a clone of the shared schema, which carries
-@@ -1370,6 +1437,7 @@ impl Database {
+@@ -1371,6 +1438,7 @@ impl Database {
      #[cfg(all(feature = "fs", feature = "conn_raw_api"))]
      pub fn do_open(io: Arc<dyn IO>, path: &str, mut options: OpenOptions) -> Result<Arc<Database>> {
          Self::validate_open_options(&options)?;
@@ -567,7 +567,7 @@ index c482e6e84..308bfd3ef 100644
          if options.storage.is_none() {
              // `use_registry = false`: the raw path never consults the registry,
              // so this only opens the file and never returns a cached Database.
-@@ -1398,6 +1466,7 @@ impl Database {
+@@ -1399,6 +1467,7 @@ impl Database {
          options: &OpenOptions,
      ) -> IOResultOr<Arc<Database>> {
          Self::validate_open_options(options)?;
@@ -575,7 +575,7 @@ index c482e6e84..308bfd3ef 100644
          let Some(storage) = options.storage.clone() else {
              return Err(LimboError::InvalidArgument(
                  "OpenOptions::storage is required for Database::do_open_async".to_string(),
-@@ -1421,6 +1490,18 @@ impl Database {
+@@ -1422,6 +1491,18 @@ impl Database {
          )
      }
  
@@ -594,7 +594,7 @@ index c482e6e84..308bfd3ef 100644
      /// Run the open state machine and release the schema guard if it fails.
      /// Never touches the registry; both the registry-aware and raw entry
      /// points funnel through here.
-@@ -1899,6 +1980,15 @@ impl Database {
+@@ -1900,6 +1981,15 @@ impl Database {
      ) -> IOResultOr<Arc<Pager>> {
          loop {
              match st {
@@ -610,7 +610,7 @@ index c482e6e84..308bfd3ef 100644
                  HeaderValidationState::Start { init } => {
                      // `_init` does not modify `open_flags` (the autovacuum
                      // override happens later in `Validate`), so capturing
-@@ -2156,7 +2246,9 @@ impl Database {
+@@ -2157,7 +2247,9 @@ impl Database {
                  } => {
                      // Always open shared WAL and set it in the Database and Pager.
                      // MVCC currently requires a WAL open to function.
@@ -621,7 +621,7 @@ index c482e6e84..308bfd3ef 100644
                          #[cfg(not(host_shared_wal))]
                          {
                              if driver.is_none() {
-@@ -2288,6 +2380,239 @@ impl Database {
+@@ -2289,6 +2381,239 @@ impl Database {
          }
      }
  
@@ -861,7 +861,7 @@ index c482e6e84..308bfd3ef 100644
      pub fn get_database_canonical_path(&self) -> String {
          if self.is_in_memory_db() {
              // For in-memory databases, SQLite shows empty string
-@@ -3455,6 +3780,37 @@ impl Database {
+@@ -3456,6 +3781,37 @@ impl Database {
      }
  }
  
