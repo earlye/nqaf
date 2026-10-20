@@ -1,6 +1,8 @@
-# performous: search and download songs via the firkin CLI
+# performous: play-and-exit mode with score output, for launch by firkin
 
 ## Update 2026-10-19
+
+Implementation is deferred until firkin needs it.
 
 **Update 2026-10-19 (from the firkin v1 design grill, firkin-media/firkin `issues/issue-01a140c1-6bd6-7ef0-94f6-4782b5140b2c-firkin-v1-design.md`):**
 The direction of integration is reversed. Performous no longer calls firkin. **firkin launches Performous** through a wrapper (`firkin-wrapper-performous`). ADR 0001, "host apps shell out to the firkin CLI", is superseded by firkin ADR 0004. The Performous work is now:
@@ -145,3 +147,4 @@ Performous references are from upstream master `947b1be`
 ### 2026-10-19
 
 - Update: the firkin v1 design grill reversed the integration direction; firkin launches Performous through `firkin-wrapper-performous`. See "Update 2026-10-19" at the top of this file.
+- Retitled from "search and download songs via the firkin CLI" to match the reversal. Implementation deferred until firkin needs it.
