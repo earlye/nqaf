@@ -19,7 +19,7 @@ The kernel logs `segfault ... error 25`; 0x25 includes the PK-violation bit. arm
 ## Reproduction
 
 - **In c3:** the agent spawns a new std thread per browser command, all siblings off main. The first browser command initializes V8 on its thread, and the second command's thread segfaults every time.
-- **Two live isolates are not required.** Dropping the first runtime before creating the second still crashes.
+- **The initializing thread's isolate must still be alive.** In the standalone repro, keeping the first isolate alive while a sibling thread creates a second exits 139 (segfault); dropping the first before the sibling creates its own exits 0. Obscura embedders that hold a long-lived browser session always meet this condition. (Corrected 2026-10-20; the first report said dropping the first isolate still crashed.)
 - **Standalone:** a 30-line repro against `v8` 137.3.0 creates an isolate on a sibling thread and exits 139 with the same fault signature. Either of these fixes it:
   - initializing the default platform on main first;
   - using `v8::new_unprotected_default_platform`.
