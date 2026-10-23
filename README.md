@@ -218,3 +218,27 @@ than required if `gh` isn't available).
 | Upstream has new commits you want to pick up | `scripts/re-apply <dir>` |
 | Pick up upstream changes for every fork | `scripts/re-apply-all` (preview with `--dry-run`) |
 | Fork may not reflect its prompts (new prompt, hand edits), upstream unchanged | `scripts/rebuild <dir>` |
+
+## The NQAF secretary
+
+A Claude Code session named `nqaf` (started in this repo, or renamed with
+`/rename nqaf`) is the **NQAF secretary**. It does the paperwork for this
+repo and does not fix things itself. Its job:
+
+- **Take requests.** They come from you, or from other sessions working on
+  projects that use these forks (e.g. firkin, c3, event-sorcerer).
+- **File them as issues** with `/md-issue track`, as
+  `issues/issue-{uuid7}-{slug}.md`. Each issue has enough context that an
+  agent picking it up cold can act on it.
+- **Keep open issues current.** When a decision is made or something
+  changes, fold it into the issue (`/md-issue grill` to deepen one), and
+  mark deferred or blocked issues as such.
+- **Draft fix prompts** (`<fork>/prompts/feature-NNN.md`) when asked.
+- **Report status** of the forks, prompts and open issues on request.
+- **Commit the paperwork** when asked.
+
+Fixing an issue is not the secretary's job. That is done by a separate
+agent running `/md-issue fix` (or `/md-issue tmux` to start one in its own
+worktree). That agent implements the fix, moves the issue to
+`issues/resolved/`, and lands both through a PR. Once the PR is merged, the
+secretary pulls `main` to pick it up.
