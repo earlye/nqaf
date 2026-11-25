@@ -145,17 +145,28 @@ $(cat "$prompt")"
   git -C "$WORK_DIR" commit -m "Apply $prompt_name"
   git -C "$WORK_DIR" push origin "$BRANCH"
   echo "Committed and pushed $prompt_name to $BRANCH"
-  # If HEAD^ already has an application of this prompt, a noop may only mean
-  # that the earlier application holds the code. export_patch combines the
-  # two when it can; when it can't, the result is hollow and is refused
-  # rather than recorded as a noop.
-  if [ -n "$noop" ] \
-     && [ -n "$(git -C "$WORK_DIR" log --format=%s HEAD^ | grep -xF "Apply $prompt_name" || true)" ]; then
-    echo "Note: $prompt_name was applied earlier on this branch; not trusting the noop reason," \
-      "so the export must include the earlier application's code" >&2
-    noop=""
+  # If an earlier application of this prompt (reachable from HEAD^) changed
+  # code, the noop may only mean that that application holds the code.
+  # export_patch combines the two when it can; when it can't, the result is
+  # hollow and is refused rather than recorded as a noop.
+  if [ -n "$noop" ]; then
+    while read -r c s; do
+      if [ "$s" = "Apply $prompt_name" ] && commit_touches_code "$WORK_DIR" "$c"; then
+        echo "Note: an earlier application of $prompt_name changed code; not trusting the noop" \
+          "reason, so the export must include that code" >&2
+        noop=""
+        break
+      fi
+    done < <(git -C "$WORK_DIR" log --format='%H %s' -F --grep="Apply $prompt_name" HEAD^)
   fi
-  export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop"
+  status=0
+  export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop" || status=$?
+  if [ "$status" -eq 1 ]; then
+    echo "Error: $prompt_name is now recorded as applied on $BRANCH, but its patch was not" \
+      "exported, so the next apply will skip it. Use re-apply, or remove" \
+      ".nqaf/prompts/$prompt_name on the branch and run apply again." >&2
+  fi
+  [ "$status" -eq 0 ] || exit 1
 done
 
 if [ "$HAVE_GH" -eq 1 ]; then

@@ -263,8 +263,8 @@ Your task: $task
 $START_OVER_RULE As your very last step, write your decision to
 \`.nqaf/decisions/$prompt_name\`: the first line is exactly \`repair\` or
 \`rebuild\`, followed by a short rationale (a few lines).
-$NOOP_RULE The old patch's changes are already in the working tree, so to
-record \`noop:\` first discard them (\`git reset --hard HEAD && git clean -fd\`).
+$NOOP_RULE Before you record \`noop:\`, discard any of the old patch's changes
+that are in the working tree (\`git reset --hard HEAD && git clean -fd\`).
 
 ---
 
@@ -410,7 +410,7 @@ write_pr_body() {
       echo "| \`${names[$i]}\` | ${paths[$i]} | **${outcomes[$i]}** |"
     done
     echo
-    echo "Outcomes: **clean** = stored patch applied with no agent; **repaired** = agent fixed up the stored patch; **rebuilt** = agent re-implemented from the prompt; **new** = no stored patch, implemented from the prompt; **noop** = agent found the feature already present upstream or superseded, so only the prompt is recorded (with \`noop=\` in its \`.base\`); **noop claimed, but code changed** = the agent recorded noop yet changed code, which is exported as usual; **hollow** = the stored patch changed only \`.nqaf/\` and the agent recorded no usable decision (\`rebuild\` or \`noop: <reason>\`). The suffix *(NO CODE CHANGES; patch not exported)* means the result still changed nothing outside \`.nqaf/\`, so the stored patch was left as it was. Path **patch, hollow** = the stored patch changed only \`.nqaf/\`, so the agent verified or rebuilt the feature instead of replaying it."
+    echo "Outcomes: **clean** = stored patch applied with no agent; **repaired** = agent fixed up the stored patch; **rebuilt** = agent re-implemented from the prompt; **new** = no stored patch, implemented from the prompt; **noop** = agent found the feature already present upstream or superseded, so only the prompt is recorded (with \`noop=\` in its \`.base\`); **noop claimed, but code changed** = the agent recorded noop yet changed code, which is exported as usual; **hollow** = the stored patch changed only \`.nqaf/\` and the agent recorded no recognised decision (the prompt asks for \`rebuild\` or \`noop: <reason>\`). The suffix *(NO CODE CHANGES; patch not exported)* means the result still changed nothing outside \`.nqaf/\`, so the stored patch was left as it was. Path **patch, hollow** = the stored patch changed only \`.nqaf/\`, so the agent verified or rebuilt the feature instead of replaying it."
     echo
     echo "## Decisions"
     for i in "${!names[@]}"; do

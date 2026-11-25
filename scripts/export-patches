@@ -101,10 +101,12 @@ for prompt in "$CONFIG_DIR/prompts/"*.md; do
   # prompt, leaving the stored patch as it was. Any other failure stops the
   # script.
   base_file="$PATCHES_DIR/${prompt_name%.md}.base"
-  stored_noop=""
-  if [ "$(base_value "$base_file" prompt-sha256)" = \
+  stored_noop="$(base_value "$base_file" noop)"
+  if [ -n "$stored_noop" ] && [ "$(base_value "$base_file" prompt-sha256)" != \
        "$(git -C "$WORK_DIR" show "$commit:.nqaf/prompts/$prompt_name" 2>/dev/null | sha256_of)" ]; then
-    stored_noop="$(base_value "$base_file" noop)"
+    echo "Warning: ignoring noop= in ${prompt_name%.md}.base: its prompt-sha256= is for a" \
+      "different prompt than the one in $(git -C "$WORK_DIR" rev-parse --short "$commit")" >&2
+    stored_noop=""
   fi
   status=0
   export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR" "" "$stored_noop" || status=$?
@@ -120,8 +122,9 @@ if [ "$missing" -gt 0 ]; then
 fi
 if [ "$hollow" -gt 0 ]; then
   echo "$hollow prompt(s) were not exported because their commit changes only .nqaf/ (hollow)." \
-    "Find the application that holds the real change, or add noop=<reason> to the .base if the" \
-    "feature is already present upstream." >&2
+    "Find the application that holds the real change, or, if the feature is already present" \
+    "upstream, add noop=<reason> to its .base, whose prompt-sha256= must match the prompt in" \
+    "that commit." >&2
 fi
 echo "Done. Review and commit $PATCHES_DIR in this repo."
 [ "$hollow" -eq 0 ]

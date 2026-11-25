@@ -124,8 +124,9 @@ it from the fork yourself.
    is the pre-squash parent, which isn't on the default branch. Prompts
    found nowhere are skipped with a warning; `re-apply` treats them as new.
    A hollow commit (only `.nqaf/`) is not exported unless the existing
-   `.base` already has `noop=`; the stored patch is left as it was. The
-   script still exports the other prompts, then exits non-zero.
+   `.base` already has `noop=` and its `prompt-sha256=` matches the prompt
+   in that commit; the stored patch is left as it was. The script still
+   exports the other prompts, then exits non-zero.
 
    **`scripts/export-all-patches [<fork-dir> ...]`** runs `export-patches`
    for every tracked fork (each top-level directory with a `fork.txt`), in
