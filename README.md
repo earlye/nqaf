@@ -27,9 +27,10 @@ Each top-level directory (e.g. `obscura/`, `postgresparser/`,
   `upstream=` (the upstream commit it was built against, when known) and
   `prompt-sha256=` (hash of the prompt that produced it — `re-apply` compares
   this against the current prompt to tell whether the prompt changed). A
-  patch that changes nothing outside `.nqaf/` is *hollow*; the scripts store
-  one only with a `noop=<reason>` line, which says that the feature is
-  already present upstream or superseded rather than lost.
+  patch that changes nothing outside `.nqaf/` and `.claude/` is *hollow*
+  (messages say "only `.nqaf/`" for short); the scripts store one only with
+  a `noop=<reason>` line, which says that the feature is already present
+  upstream or superseded rather than lost.
 - `check` (optional) — a shell command run in `work/` to verify the fork
   after `re-apply`. Without it, `re-apply` falls back to `make test` if the
   fork's Makefile has a `test` target, else reports the result as
@@ -88,9 +89,10 @@ it from the fork yourself.
    it. After each prompt, **the result is committed as `Apply <prompt>` and
    pushed to `<branch>` on origin immediately** — so progress survives even
    if a later prompt in the same run fails — and that commit is exported to
-   `patches/` (a no-op commit with `noop=<reason>` in its `.base`). Once at least one prompt has run, it uses `gh` to
-   open a PR from `<branch>` into the fork's default branch (skipped if a
-   PR already exists for that branch, or if `gh` isn't installed/authed).
+   `patches/`. For a no-op, the `.base` gets a `noop=<reason>` line. Once at
+   least one prompt has run, it uses `gh` to open a PR from `<branch>` into
+   the fork's default branch (skipped if a PR already exists for that
+   branch, or if `gh` isn't installed/authed).
    Use this:
    - the first time you apply prompts to a fork, on a new branch, or
    - to apply newly-added prompts on an existing, already-pushed branch
@@ -104,9 +106,9 @@ it from the fork yourself.
    long as nothing but those commits (or empty commits, or commits that only
    delete or re-add `.nqaf/prompts/<prompt>`, such as "Removing <prompt> to
    force re-apply") sits between the first and the last. If another
-   feature's commit sits between them, only
-   the latest delta is exported, with a warning that names the commit in the
-   way; `re-apply` will then likely need the agent to repair that patch.
+   feature's commit sits between them, only the latest delta is exported,
+   with a warning that names the commit in the way; `re-apply` will then
+   likely need the agent to repair that patch.
    Prefer `re-apply` for changed prompts, which always produces one whole
    commit per feature.
 
@@ -122,8 +124,8 @@ it from the fork yourself.
    is the pre-squash parent, which isn't on the default branch. Prompts
    found nowhere are skipped with a warning; `re-apply` treats them as new.
    A hollow commit (only `.nqaf/`) is not exported unless the existing
-   `.base` already has `noop=`; the stored patch is left as it was, and the
-   script exits non-zero after the other prompts.
+   `.base` already has `noop=`; the stored patch is left as it was. The
+   script still exports the other prompts, then exits non-zero.
 
    **`scripts/export-all-patches [<fork-dir> ...]`** runs `export-patches`
    for every tracked fork (each top-level directory with a `fork.txt`), in
@@ -157,10 +159,13 @@ it from the fork yourself.
    `rebuild` or `new`, plus a short rationale, or `noop: <reason>` when the
    feature is already present upstream or superseded and it changed no
    code); those files are reported in the PR and never committed. A
-   `noop:` reason is written to the `.base` as `noop=<reason>`. If a feature
-   still ends up with no code change and no `noop:`, its patch is not
-   exported and its outcome is flagged in the PR. Each feature becomes one `Apply <prompt>`
-   commit, and its patch and `.base` are exported back to `patches/`.
+   `noop:` reason is written to the `.base` as `noop=<reason>`. A stored
+   `noop=` is reused only when the stored patch is replayed unchanged; once
+   the agent runs, it must record `noop:` again. If a feature still ends up
+   with no code change and no `noop:`, its patch is not exported, and the PR
+   flags its outcome, warns at the top of the body and marks the title.
+   Each feature becomes one `Apply <prompt>` commit, and its patch and
+   `.base` are exported back to `patches/`.
 
    After all prompts, it runs the check once (`<fork-dir>/check`, else
    `make test`, else *unverified* — a fork without tests doesn't fail the

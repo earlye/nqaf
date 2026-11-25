@@ -84,6 +84,7 @@ print_summary
 
 title="NQAF: carry fork forward onto upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")"
 [ "$check_result" = "fail" ] && title="$title (CHECK FAILED)"
+[ -n "$unexported" ] && title="$title (FEATURES NOT EXPORTED)"
 push_and_open_pr "$branch" "$title" "$pr_body"
 
 if [ "$check_result" = "fail" ]; then

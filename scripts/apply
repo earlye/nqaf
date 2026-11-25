@@ -126,7 +126,8 @@ $(cat "$prompt")"
   git -C "$WORK_DIR" add -A
   unstage_local_files "$WORK_DIR"
   drop_build_outputs "$WORK_DIR"
-  # Checked before the prompt marker is copied in, which is always a change.
+  # The marker is copied in only after this check passes: a marker left
+  # behind by the exit below would make the next run skip this prompt.
   if git -C "$WORK_DIR" diff --cached --quiet -- "${CODE_PATHSPEC[@]}"; then
     if [ -z "$noop" ]; then
       echo "Error: $prompt_name changed nothing outside .nqaf/ and the agent recorded no" \

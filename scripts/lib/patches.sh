@@ -23,7 +23,11 @@ sha256_of() {
 # force a re-apply), this builds (with commit-tree, so no ref changes) one
 # commit with the last application's tree on the first application's parent.
 # If another commit sits in between while the prompt is still recorded, the
-# feature can't be isolated, so it prints <commit> unchanged and warns.
+# feature can't be isolated, so it prints <commit> unchanged and warns. If the
+# prompt was removed between that commit and the next application, it stops
+# there without a warning and combines from that application onwards; the
+# result may then be hollow even though an earlier application holds the
+# code, and export_patch's hollow check catches that.
 combine_applications() {
   local work="$1" last="$2" name="$3"
   local first="$last" p subject blocker count=1
@@ -86,20 +90,27 @@ commit_touches_code() {
 }
 
 # patch_touches_code <patch-file> — true if the stored patch changes any file
-# outside .nqaf/ and .claude/.
+# outside .nqaf/ and .claude/. Runs from / because `git apply` inside a
+# repository subdirectory ignores paths outside it. A patch that git can't
+# read counts as touching code (with a warning), so the caller replays it and
+# reports the real error instead of calling it hollow.
 patch_touches_code() {
-  local stat
-  stat="$(git apply --numstat --exclude='.nqaf/*' --exclude='.claude/*' "$1" 2>/dev/null || true)"
+  local file="$1" stat
+  case "$file" in /*) ;; *) file="$PWD/$file" ;; esac
+  if ! stat="$(cd / && git apply --numstat --exclude='.nqaf/*' --exclude='.claude/*' "$file" 2>&1)"; then
+    echo "Warning: can't read $1: $stat" >&2
+    return 0
+  fi
   [ -n "$stat" ]
 }
 
-# noop_reason <decision-file> — prints the reason from the file's first
-# `noop: <reason>` line, or nothing. An agent writes one when the feature is
+# noop_reason <decision-file> — prints the reason if the file's first line is
+# `noop: <reason>`, or nothing. An agent writes one when the feature is
 # already present upstream or superseded, so a change touching only .nqaf/
 # is intended.
 noop_reason() {
   [ -f "$1" ] || return 0
-  sed -n 's/^noop:[[:space:]]*//p' "$1" | head -n1
+  head -n1 "$1" | sed -n 's/^noop:[[:space:]]*//p'
 }
 
 # export_patch <work-dir> <commit> <prompt-name> <patches-dir> [upstream-sha] [noop-reason]
@@ -112,44 +123,52 @@ noop_reason() {
 # produced from. If no upstream sha is given, it falls back to the merge-base
 # with upstream/HEAD when that ref exists, and is omitted otherwise.
 #
-# A hollow commit (see CODE_PATHSPEC) is exported only with a noop reason:
-# the one given, else the noop= already in the existing .base. Otherwise it
-# writes nothing and returns 1. noop= is recorded only for hollow commits.
+# A hollow commit (see CODE_PATHSPEC) is exported only with a noop reason;
+# without one it writes nothing and returns 1. Callers that trust a stored
+# noop= pass it in explicitly. noop= is recorded only for hollow commits.
+#
+# Callers test the result (to tell a hollow refusal apart), which turns off
+# set -e in here, so every step checks its own status, and any other failure
+# returns 2.
 export_patch() {
   local work="$1" commit="$2" name="$3" dir="$4" upstream="${5:-}" noop="${6:-}"
   local feature="${name%.md}"
   local parent hash
 
-  commit="$(combine_applications "$work" "$commit" "$name")"
+  commit="$(combine_applications "$work" "$commit" "$name")" && [ -n "$commit" ] || return 2
   if commit_touches_code "$work" "$commit"; then
     noop=""
+  elif [ -z "$noop" ]; then
+    echo "Error: not exporting $feature.patch: $(git -C "$work" rev-parse --short "$commit")" \
+      "changes nothing outside .nqaf/, and there is no noop reason saying why" >&2
+    return 1
   else
-    [ -n "$noop" ] || noop="$(base_value "$dir/$feature.base" noop)"
-    if [ -z "$noop" ]; then
-      echo "Error: not exporting $feature.patch: $(git -C "$work" rev-parse --short "$commit")" \
-        "changes only .nqaf/ (no code), and there is no noop reason saying why" >&2
-      return 1
-    fi
-    echo "Note: $feature.patch changes only .nqaf/; recording noop=$noop" >&2
+    echo "Note: $feature.patch changes nothing outside .nqaf/; recording noop=$noop" >&2
   fi
-  mkdir -p "$dir"
-  # .claude/ holds per-checkout agent settings; older forks committed it, but
-  # it never belongs in a stored patch.
-  git -C "$work" format-patch --stdout --no-signature "$commit^!" -- . ':(exclude).claude' \
-    > "$dir/$feature.patch"
-  parent="$(git -C "$work" rev-parse "$commit^")"
-  hash="$(git -C "$work" show "$commit:.nqaf/prompts/$name" | sha256_of)"
+  parent="$(git -C "$work" rev-parse "$commit^")" || return 2
+  hash="$(git -C "$work" show "$commit:.nqaf/prompts/$name" | sha256_of)" || return 2
 
   if [ -z "$upstream" ] && git -C "$work" rev-parse -q --verify upstream/HEAD >/dev/null; then
     upstream="$(git -C "$work" merge-base "$commit" upstream/HEAD || true)"
   fi
+
+  mkdir -p "$dir" || return 2
+  # .claude/ holds per-checkout agent settings; older forks committed it, but
+  # it never belongs in a stored patch. Written to a .new file first, so a
+  # failure leaves the stored patch as it was.
+  if ! git -C "$work" format-patch --stdout --no-signature "$commit^!" -- . ':(exclude).claude' \
+       > "$dir/$feature.patch.new"; then
+    rm -f "$dir/$feature.patch.new"
+    return 2
+  fi
+  mv "$dir/$feature.patch.new" "$dir/$feature.patch" || return 2
 
   {
     echo "parent=$parent"
     [ -n "$upstream" ] && echo "upstream=$upstream"
     echo "prompt-sha256=$hash"
     if [ -n "$noop" ]; then echo "noop=$noop"; fi
-  } > "$dir/$feature.base"
+  } > "$dir/$feature.base" || return 2
 
   echo "Exported $feature.patch (+ .base) from $(git -C "$work" rev-parse --short "$commit")"
 }
