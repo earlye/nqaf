@@ -1585,7 +1585,7 @@ dependencies = [
 [[package]]
 name = "turso_core"
 version = "0.8.0"
-source = "git+https://github.com/earlye-forks/turso.git#066f6629034191c8ba86f9653dec96690b21cdab"
+source = "git+https://github.com/earlye-forks/turso.git?rev=402022b21349ca76a35fbd5916293dee662575c8#402022b21349ca76a35fbd5916293dee662575c8"
 dependencies = [
  "aegis",
  "aes",
@@ -1656,7 +1656,7 @@ dependencies = [
 [[package]]
 name = "turso_ext"
 version = "0.8.0"
-source = "git+https://github.com/earlye-forks/turso.git#066f6629034191c8ba86f9653dec96690b21cdab"
+source = "git+https://github.com/earlye-forks/turso.git?rev=402022b21349ca76a35fbd5916293dee662575c8#402022b21349ca76a35fbd5916293dee662575c8"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -1666,7 +1666,7 @@ dependencies = [
 [[package]]
 name = "turso_macros"
 version = "0.8.0"
-source = "git+https://github.com/earlye-forks/turso.git#066f6629034191c8ba86f9653dec96690b21cdab"
+source = "git+https://github.com/earlye-forks/turso.git?rev=402022b21349ca76a35fbd5916293dee662575c8#402022b21349ca76a35fbd5916293dee662575c8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1676,7 +1676,7 @@ dependencies = [
 [[package]]
 name = "turso_parser"
 version = "0.8.0"
-source = "git+https://github.com/earlye-forks/turso.git#066f6629034191c8ba86f9653dec96690b21cdab"
+source = "git+https://github.com/earlye-forks/turso.git?rev=402022b21349ca76a35fbd5916293dee662575c8#402022b21349ca76a35fbd5916293dee662575c8"
 dependencies = [
  "bitflags",
  "memchr",
