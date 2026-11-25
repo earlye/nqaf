@@ -23,3 +23,11 @@ Replacing the file with a clean patch in a new commit is not enough. The 75MB bl
 ## Why not Git LFS
 
 GitHub allows LFS for a single path, but switching `obscura/patches/feature-004.patch` to LFS only affects new commits. The 75MB blob already in `19a537e` stays in history unless it is rewritten (e.g. `git lfs migrate import`), so LFS still needs the same rewrite and force-push. It also adds a git-lfs dependency for cloning and uses LFS storage/bandwidth quota, all to store build output that shouldn't be in the patch at all.
+
+## Resolution (2026-11-24)
+
+Correction: the 75MB patch first appeared in `81dc084` ("working through getting apply-all to work."), not `19a537e`. `19a537e` only changed the patch's `From <sha>` line, which created a second 75MB blob. Both blobs had to go.
+
+Rather than re-running `scripts/re-apply obscura`, the clean patch was regenerated offline. In a scratch clone of the fork, the old patch was applied with `git am` onto the `.base` parent (`9049f9cd`), `target-headchk/` was removed, the commit was amended, and the patch was re-exported with `export_patch`'s `format-patch` command. The result is 21,222 bytes (it was 75,216,075), and its 9 real file diffs are byte-identical to the originals. `feature-004.base` did not change.
+
+`git filter-branch --index-filter` swapped both blobs for clean ones in every commit from `81dc084` to the tip (12 commits). The rewrite kept author, committer and message metadata, but the GitHub signatures on #17 and #18 were lost. `main` was force-pushed with `--force-with-lease=main:ac92b4f` (`ac92b4f`, an issue-tracking commit pushed during the rewrite, was replayed on top). Old→new: `81dc084`→`198176b`, `19a537e`→`f695699`, `6041039`→`9244b05`, `ac92b4f`→`aff2bf9`. Other clones must reset to the new `main`.
