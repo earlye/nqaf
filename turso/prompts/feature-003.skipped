@@ -1,0 +1,19 @@
+feature-003 is intentionally unused.
+
+The MVCC log suffix-naming prompt held 003 while its PR was open, so the
+op_variable prompt that merged first took 004. When the MVCC prompt
+landed after it, it was renumbered to 005 rather than back to 003, so
+that filename order matches the order in which the PRs merged.
+
+Why: re-apply and rebuild carry prompts forward in filename order, and
+each stored patch was built on top of the features before it. We judge
+that keeping that order is likely (about 65% confidence) more important
+than having no gaps in the numbering. Nothing in the scripts needs the
+numbers to be consecutive.
+
+This file is deliberately not named *.md: scripts/apply and
+scripts/re-apply treat every prompts/*.md as a prompt to apply.
+
+(feature-002 is also absent from nqaf, for a different reason: the fork
+already carries an applied feature-002, "Run CI on GitHub-hosted
+runners", that nqaf does not track yet.)
