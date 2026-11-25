@@ -4,8 +4,8 @@
 # pyo3, a glibc-2.34-compatible sqlite3, yarn via corepack).
 set -e
 . ../check-env.sh
-# make test runs no turso_core unit tests, so run the modules that the fork's
-# features touch before it, since they fail fastest.
+# make test runs no turso_core unit tests, so first run the test modules that
+# the fork's features add or touch, because they fail fastest.
 cargo test -p turso_core --lib -- orphan_wal_tests multiprocess_tests \
   vacuum statement_lifecycle_tests group_commit_sync_mode_tests param_sharing_tests
 exec make test TEST_RUNNER="sh $PWD/../sqltest-serial.sh"

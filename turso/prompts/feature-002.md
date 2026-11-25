@@ -79,14 +79,14 @@ Share the parameter value between its slot and the registers that read it.
   into an owned `Register::Value` (e.g. with `Arc::unwrap_or_clone`)
   before it mutates, so that it never mutates the parameter slot. **Unshare
   only on the branch that actually changes the value**: decide through
-  `get_value()` first. This matters most for `apply_affinity_char`, which
-  runs on every inserted column and usually changes nothing; unsharing at
-  its top would copy every bound blob again and undo this change.
+  `get_value()` first. This matters most for `apply_affinity_char` (see
+  above): unsharing at its top would copy every bound blob again and undo
+  this change.
 - Audit every match on `Register::Value(..)` across the whole workspace
   (e.g. `rg 'Register::Value\(' --type rust`, which at `4b59a37` also hits
   `core/storage/btree.rs`, `core/functions/printf.rs`, `core/vdbe/value.rs`,
   `core/vdbe/array.rs`, `core/index_method/fts.rs`,
-  `core/incremental/expr_compiler.rs`, `tests/integration` and `fuzz`).
+  `core/incremental/expr_compiler.rs` and `tests/integration`).
   Start with `Row::get` and `Row::get_value` in `core/vdbe/mod.rs`
   (~2887-2912): every result column is read through them, and today they
   hit `unreachable!` on any register that isn't `Register::Value`. Other
@@ -136,8 +136,10 @@ layers convert values:
 7. **Insert round-trip.** With `CREATE TABLE b(x BLOB)`, bind a 1 MB blob
    into `INSERT INTO b VALUES (?1)`, reset and rebind several times with
    different blobs, then read all rows back and compare bytes.
-8. **Affinity does not unshare.** In `core/vdbe/execute.rs`'s own test
-   module (`apply_affinity_char` is private), show that applying it to a
+8. **Affinity does not unshare.** In a nested
+   `mod param_sharing_tests` inside `core/vdbe/execute.rs`'s own
+   `mod tests` (`apply_affinity_char` is private; keep that nested name so
+   that `turso/check`'s filter matches it too), show that applying it to a
    shared register leaves the register shared (same `Arc`) for a Blob under
    any affinity, and for a Text under Text affinity, and that it unshares
    and converts a Text `'42'` under Integer affinity without changing the
@@ -151,8 +153,8 @@ layers convert values:
 - Run `cargo fmt`, `cargo clippy -p turso_core`, the new tests, and the
   existing `turso_core` lib tests that exercise statements, triggers,
   VACUUM and the VDBE (`cargo test -p turso_core --lib`). Also
-  `cargo check` the crates outside `core` that match on `Register` (at
-  `4b59a37`: `tests/integration` and `fuzz`). Do not run the full `make test`.
+  `cargo check` the workspace crates outside `core` that use `Register`
+  (at `4b59a37`: `tests/integration`). Do not run the full `make test`.
 
 ## Update README
 
