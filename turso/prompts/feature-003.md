@@ -98,7 +98,7 @@ the `.db-log` name; do not touch them.
 1. **Suffix naming.** The log path is `format!("{name}-log")`, where `name`
    is the same string the default WAL name suffixes: the database path **as
    passed** to open (`Database::path`), **not** the canonicalized path from
-   `get_database_canonical_path`. This is a deliberate choice: the log must
+   `get_database_canonical_path`. The log must
    sit beside the WAL as a sidecar of the same `name`, inside the same IO,
    and `std::fs::canonicalize` is meaningless for a non-filesystem IO. All
    four `open_mv_store` callers use this name when the option is on,
@@ -119,20 +119,26 @@ the `.db-log` name; do not touch them.
      `> 0`.
    - Any other error, from the open or from `size()`, propagates. So the
      function returns `Result<bool>` under the option (or always; your
-     choice, as long as off-mode behaviour is unchanged). No `unwrap`.
-   - Use `ReadOnly`, not the database's own open flags. On `UnixIO`, a
-     read-write open without `NoLock` takes an exclusive `fcntl` lock
-     (`io/unix.rs` ~67-71), and closing the probe's file descriptor would
-     drop every `fcntl` lock the process holds on that file. Drop the probe
-     file before `open_mv_store` opens the log for real.
+     choice, as long as behaviour with the option off is unchanged). No
+     `unwrap`.
+   - Use `ReadOnly`, not the database's own open flags, so that the probe
+     takes no lock: on `UnixIO`, a read-write open without `NoLock` takes
+     an exclusive `fcntl` lock (`io/unix.rs` ~67-71). Separately, on POSIX,
+     closing *any* descriptor to a file drops every `fcntl` lock the
+     process holds on it, whatever flags it was opened with. So the probe
+     must not run while this process has the log open: drop the probe file
+     before `open_mv_store` opens the log for real. In
+     `reload_wal_after_external_restore` the probe runs only when
+     `mvcc_enabled()` is false (the `||` short-circuits), so no store has
+     the log open there; keep that ordering.
 3. **Both `logical_log_exists` callers** honour the option: the one on
    every open (`database.rs` ~2000) and the one in
    `reload_wal_after_external_restore` (~2678).
 
 The option affects only the default file-backed MVCC storage. When a custom
 `DurableStorage` is supplied, `open_mv_store` still does not open a log
-file. The existence check runs as it does today, using whichever name and
-mechanism the option selects.
+file. The existence check still runs, with the name and mechanism that the
+option selects.
 
 How you thread the option is up to you. One way: a helper such as
 `journal_mode::logical_log_path(db_path, canonical_path, suffix_naming) ->
@@ -215,11 +221,20 @@ that dir.
    check.
 7. **Option on, external-restore reload** (gate it with
    `#[cfg(feature = "conn_raw_api")]`, because `conn_raw_api` is not a
-   default feature). Set up as in test 1, then call
-   `Connection::reload_wal_after_external_restore()`. It succeeds, the rows
-   are still visible, `{tmp}/foo.sqlite-log` is still the only log in the
-   IO (no `{tmp}/foo.db-log` was created), and the temp dir on real disk is
-   still empty.
+   default feature). Two cases:
+   - **MVCC mode** (covers the reload's `open_mv_store` naming). Set up as
+     in test 1, then call `Connection::reload_wal_after_external_restore()`.
+     It succeeds, the rows are still visible, `{tmp}/foo.sqlite-log` is
+     still the only log in the IO (no `{tmp}/foo.db-log` was created), and
+     the temp dir on real disk is still empty.
+   - **WAL mode** (covers the reload's `logical_log_exists` call, which the
+     MVCC case skips because `mvcc_enabled()` short-circuits it). Write a
+     non-empty stray `{tmp}/foo.db-log` on the real disk. Open `{tmp}/foo.db`
+     on a `MemoryIO` with the option on, in WAL mode with a table and a
+     row, and call `reload_wal_after_external_restore()`. It succeeds, the
+     row is visible, and the database still has no MVCC store
+     (`get_mv_store()` is `None`), because the probe looked inside the IO
+     and found no log.
 
 ## Constraints
 
@@ -232,14 +247,16 @@ that dir.
   existing code style, error handling and naming, and do no unrelated
   refactors.
 - Run `cargo fmt`, `cargo clippy` on `turso_core`, and
-  `cargo test -p turso_core --lib -- mvcc_log_suffix_tests orphan_wal_tests mvcc`.
-  Do not run the full `make test`.
+  `cargo test -p turso_core --lib -- mvcc_log_suffix_tests orphan_wal_tests mvcc`,
+  and `cargo test -p turso_core --lib --features conn_raw_api -- mvcc_log_suffix_tests`
+  (test 7 compiles only with that feature). Do not run the full `make test`.
 
 ## Update README
 
 In the "Fork Features" subsection of the "About This Fork" section of
 `README.md`, add a bullet: `DatabaseOpts::with_mvcc_log_suffix_naming`
-(default off). When on, the MVCC logical log is named `{path}-log`, beside
-`{path}-wal`, instead of `with_extension("db-log")`, and it is opened and
+(default off). When on, the MVCC logical log is named `{path}-log` (the
+same `{path}` that the default WAL name `{path}-wal` suffixes) instead of
+`with_extension("db-log")`, and it is opened and
 existence-checked only through the supplied `IO`. When off, naming and
 behaviour match upstream.
