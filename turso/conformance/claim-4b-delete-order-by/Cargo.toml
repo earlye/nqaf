@@ -23,7 +23,7 @@ publish = false
 # is rot in this suite, and no claim result means anything until it is fixed.
 
 [dependencies]
-turso_core = { git = "https://github.com/earlye-forks/turso.git" }
+turso_core = { git = "https://github.com/earlye-forks/turso.git", rev = "efdf54fc8de8c14f783f4f58936e0808ae790e98" }
 
 [dev-dependencies]
 anyhow = "1"

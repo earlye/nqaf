@@ -10,6 +10,6 @@ set -e
 # mvcc unit tests, which guard feature-005's option-off path, are not run here.
 cargo test -p turso_core --lib -- orphan_wal_tests multiprocess_tests \
   vacuum statement_lifecycle_tests group_commit_sync_mode_tests param_sharing_tests \
-  mvcc_log_suffix_tests
+  mvcc_log_suffix_tests delete_order_by_limit_tests
 cargo test -p turso_core --lib --features conn_raw_api -- mvcc_log_suffix_tests
 exec make test TEST_RUNNER="sh $PWD/../sqltest-serial.sh"
