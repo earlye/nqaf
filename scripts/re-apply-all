@@ -47,7 +47,7 @@ check_failed=()
 failed=()
 for project in "${projects[@]}"; do
   echo "=== $project"
-  cmd=("$ROOT_DIR/scripts/re-apply" "${forward[@]}" "$project")
+  cmd=("$ROOT_DIR/scripts/re-apply" ${forward[@]+"${forward[@]}"} "$project")
   if [ "$dry_run" -eq 1 ]; then
     printf '%q ' "${cmd[@]}"
     echo
