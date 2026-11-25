@@ -166,14 +166,17 @@ exclude_build_outputs() {
   case "$exclude_file" in /*) ;; *) exclude_file="$work/$exclude_file" ;; esac
   mkdir -p "$(dirname "$exclude_file")"
   touch "$exclude_file"
-  mapfile -t tracked < <(git -C "$work" ls-tree -r -d --name-only HEAD | awk -F/ '{ print $NF }' | sort -u)
+  tracked=()
+  while IFS= read -r name || [ -n "$name" ]; do
+    tracked+=("$name")
+  done < <(git -C "$work" ls-tree -r -d --name-only HEAD | awk -F/ '{ print $NF }' | sort -u)
   tmp="$exclude_file.nqaf.$$"
   {
     awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$exclude_file"
     echo "$begin"
     for pattern in "${BUILD_OUTPUT_DIRS[@]}"; do
       skip=0
-      for name in "${tracked[@]}"; do
+      for name in ${tracked[@]+"${tracked[@]}"}; do
         # shellcheck disable=SC2053  # glob match is intended
         [[ "$name" == $pattern ]] && { skip=1; break; }
       done
@@ -198,9 +201,14 @@ exclude_build_outputs() {
 # directory; returns 0 whether or not anything was dropped.
 drop_build_outputs() {
   local work="$1" base="${2:-HEAD}"
-  local path dir prefix comp exclude_file n
-  local -A verdict=() dropped=()
-  local -a comps
+  local path dir prefix comp exclude_file n i
+  # Bash 3.2 has no associative arrays. Directories already judged are kept
+  # as newline-delimited lists (each entry framed by newlines); dropped
+  # directories and their file counts are parallel indexed arrays.
+  local nl=$'\n' build_dirs source_dirs
+  local -a comps dropped_dirs dropped_counts
+  build_dirs="$nl" source_dirs="$nl"
+  dropped_dirs=() dropped_counts=()
 
   while IFS= read -r -d '' path; do
     IFS=/ read -r -a comps <<<"$path"
@@ -208,28 +216,43 @@ drop_build_outputs() {
     for comp in "${comps[@]:0:${#comps[@]}-1}"; do
       dir="${prefix:+$prefix/}$comp"
       prefix="$dir"
-      if [ -z "${verdict[$dir]+x}" ]; then
-        verdict[$dir]=0
-        if ! git -C "$work" cat-file -e "$base:$dir" 2>/dev/null; then
-          if is_build_output_name "$comp" \
-             || [ -f "$work/$dir/CACHEDIR.TAG" ] \
-             || git -C "$work" cat-file -e ":$dir/CACHEDIR.TAG" 2>/dev/null; then
-            verdict[$dir]=1
+      case "$build_dirs$source_dirs" in
+        *"$nl$dir$nl"*) ;;
+        *)
+          if ! git -C "$work" cat-file -e "$base:$dir" 2>/dev/null \
+             && { is_build_output_name "$comp" \
+                  || [ -f "$work/$dir/CACHEDIR.TAG" ] \
+                  || git -C "$work" cat-file -e ":$dir/CACHEDIR.TAG" 2>/dev/null; }; then
+            build_dirs="$build_dirs$dir$nl"
+          else
+            source_dirs="$source_dirs$dir$nl"
           fi
-        fi
-      fi
-      if [ "${verdict[$dir]}" -eq 1 ]; then
-        dropped[$dir]=$(( ${dropped[$dir]:-0} + 1 ))
-        break
-      fi
+          ;;
+      esac
+      case "$build_dirs" in
+        *"$nl$dir$nl"*)
+          n=-1
+          for i in "${!dropped_dirs[@]}"; do
+            [ "${dropped_dirs[$i]}" = "$dir" ] && { n="$i"; break; }
+          done
+          if [ "$n" -ge 0 ]; then
+            dropped_counts[n]=$(( dropped_counts[n] + 1 ))
+          else
+            dropped_dirs+=("$dir")
+            dropped_counts+=(1)
+          fi
+          break
+          ;;
+      esac
     done
   done < <(git -C "$work" diff --cached --name-only -z --no-renames --diff-filter=A "$base")
 
-  [ "${#dropped[@]}" -gt 0 ] || return 0
+  [ "${#dropped_dirs[@]}" -gt 0 ] || return 0
   exclude_file="$(git -C "$work" rev-parse --git-path info/exclude)"
   case "$exclude_file" in /*) ;; *) exclude_file="$work/$exclude_file" ;; esac
-  for dir in "${!dropped[@]}"; do
-    n="${dropped[$dir]}"
+  for i in "${!dropped_dirs[@]}"; do
+    dir="${dropped_dirs[$i]}"
+    n="${dropped_counts[$i]}"
     echo "Warning: not committing $n new file(s) under build-output directory $dir/" >&2
     git -C "$work" rm -r -q --cached --ignore-unmatch -- "$dir"
     grep -qxF "/$dir/" "$exclude_file" 2>/dev/null || echo "/$dir/" >> "$exclude_file"

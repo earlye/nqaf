@@ -50,7 +50,10 @@ echo "Fork repo: $slug"
 # ---- 1. Find and check the PR -------------------------------------------
 
 if [ -z "$PR" ]; then
-  mapfile -t candidates < <(gh pr list --repo "$slug" --state open --limit 100 \
+  candidates=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    candidates+=("$line")
+  done < <(gh pr list --repo "$slug" --state open --limit 100 \
     --json number,headRefName,isCrossRepository \
     --jq '.[] | select(.isCrossRepository | not) | select(.headRefName | test("^nqaf-(rebase|rebuild)-")) | "\(.number) \(.headRefName)"')
   case "${#candidates[@]}" in
@@ -129,7 +132,7 @@ if rules_json="$(gh api "repos/$slug/rules/branches/$base" --paginate 2>/dev/nul
     echo "Ruleset $rs_id ($src_type $(jq -r .ruleset_source <<<"$rule")): $(jq -r .type <<<"$rule") rule blocks merge commits"
     if [ "$src_type" != Repository ]; then
       refuse "ruleset $rs_id is defined at the $src_type level; this script only changes repository rulesets"
-    elif [[ " ${ruleset_ids[*]} " != *" $rs_id "* ]]; then
+    elif [[ " ${ruleset_ids[*]:-} " != *" $rs_id "* ]]; then
       ruleset_ids+=("$rs_id")
     fi
   done < <(jq -c '.[]' <<<"$blocking")
@@ -145,7 +148,7 @@ declare -a planned=()
 [ "$orig_allow_merge" = true ] || planned+=("set allow_merge_commit=true in $slug")
 
 # Original and relaxed rules for each ruleset to change.
-for rs_id in "${ruleset_ids[@]}"; do
+for rs_id in ${ruleset_ids[@]+"${ruleset_ids[@]}"}; do
   gh api "repos/$slug/rulesets/$rs_id" > "$state_dir/ruleset-$rs_id.json"
   jq '{rules: .rules}' "$state_dir/ruleset-$rs_id.json" > "$state_dir/ruleset-$rs_id.orig-rules.json"
   jq '{rules: [.rules[]
@@ -199,7 +202,7 @@ restore() {
       echo "!!!!!   gh api -X PATCH repos/$slug -F allow_merge_commit=$orig_allow_merge" >&2
     fi
   fi
-  for rs_id in "${changed_rulesets[@]}"; do
+  for rs_id in ${changed_rulesets[@]+"${changed_rulesets[@]}"}; do
     echo "Restoring ruleset $rs_id rules"
     gh api -X PUT "repos/$slug/rulesets/$rs_id" --input "$state_dir/ruleset-$rs_id.orig-rules.json" >/dev/null
     now="$(gh api "repos/$slug/rulesets/$rs_id" | jq -S '[.rules[] | {type, parameters}]')"
@@ -229,7 +232,7 @@ if [ "$orig_allow_merge" != true ]; then
   echo "Enabling merge commits in $slug"
   gh api -X PATCH "repos/$slug" -F allow_merge_commit=true >/dev/null
 fi
-for rs_id in "${ruleset_ids[@]}"; do
+for rs_id in ${ruleset_ids[@]+"${ruleset_ids[@]}"}; do
   changed_rulesets+=("$rs_id")
   echo "Relaxing ruleset $rs_id"
   gh api -X PUT "repos/$slug/rulesets/$rs_id" --input "$state_dir/ruleset-$rs_id.relaxed-rules.json" >/dev/null
