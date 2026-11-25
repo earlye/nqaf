@@ -84,6 +84,7 @@ for prompt in "${prompts[@]}"; do
   [ -f "$prompt" ] || { echo "Prompt not found: $prompt" >&2; exit 1; }
   prompt_name="$(basename "$prompt")"
   marker="$WORK_DIR/.nqaf/prompts/$prompt_name"
+  decision_file="$WORK_DIR/.nqaf/decisions/$prompt_name"
 
   if [ -f "$marker" ] && cmp -s "$prompt" "$marker"; then
     echo "Skipping $prompt_name (unchanged since last run; recorded in .nqaf/prompts/)"
@@ -91,15 +92,23 @@ for prompt in "${prompts[@]}"; do
   fi
 
   echo "Applying $prompt_name..."
+  rm -f "$decision_file"
   wrapped_prompt="This fix may already be present in this codebase (applied in an
 earlier run, merged in from upstream, or implemented independently). Before
 making any changes: inspect the relevant code and determine whether the fix
 described below has already been fully implemented.
 
-- If it has already been fully implemented, make no code changes — just
-  confirm that it is already in place.
+- If it has already been fully implemented, or upstream has superseded it,
+  make no code changes. Instead, as your very last step, write
+  \`.nqaf/decisions/$prompt_name\` containing one line \`noop: <reason>\`,
+  where <reason> says on that one line where the fix already lives or what
+  supersedes it.
 - If it has not been fully implemented (in whole or in part), implement it
-  as described below.
+  as described below. You must change code: a run that changes nothing
+  outside \`.nqaf/\` and records no \`noop:\` decision is treated as a
+  failure.
+
+Do not commit. Ignore \`.nqaf/prompts/\`; the script maintains it.
 
 ---
 
@@ -111,20 +120,31 @@ $(cat "$prompt")"
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
 
-  mkdir -p "$WORK_DIR/.nqaf/prompts"
-  cp "$prompt" "$marker"
+  noop="$(noop_reason "$decision_file")"
+  rm -f "$decision_file"
 
   git -C "$WORK_DIR" add -A
   unstage_local_files "$WORK_DIR"
   drop_build_outputs "$WORK_DIR"
-  if git -C "$WORK_DIR" diff --cached --quiet; then
-    echo "No changes from $prompt_name; nothing to commit"
+  # Checked before the prompt marker is copied in, which is always a change.
+  if git -C "$WORK_DIR" diff --cached --quiet -- "${CODE_PATHSPEC[@]}"; then
+    if [ -z "$noop" ]; then
+      echo "Error: $prompt_name changed nothing outside .nqaf/ and the agent recorded no" \
+        "'noop: <reason>' in .nqaf/decisions/$prompt_name; not recording it as applied" >&2
+      exit 1
+    fi
+    echo "No code changes from $prompt_name (noop: $noop)"
   else
-    git -C "$WORK_DIR" commit -m "Apply $prompt_name"
-    git -C "$WORK_DIR" push origin "$BRANCH"
-    echo "Committed and pushed $prompt_name to $BRANCH"
-    export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR"
+    noop=""
   fi
+
+  mkdir -p "$WORK_DIR/.nqaf/prompts"
+  cp "$prompt" "$marker"
+  git -C "$WORK_DIR" add -- "$marker"
+  git -C "$WORK_DIR" commit -m "Apply $prompt_name"
+  git -C "$WORK_DIR" push origin "$BRANCH"
+  echo "Committed and pushed $prompt_name to $BRANCH"
+  export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop"
 done
 
 if [ "$HAVE_GH" -eq 1 ]; then

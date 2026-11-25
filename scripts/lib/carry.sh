@@ -104,14 +104,21 @@ done before.
 Do not commit. Leave no conflict markers. Ignore \`.nqaf/prompts/\`; the
 script maintains it."
 
+NOOP_RULE="If the feature is already fully present in this codebase (upstream has
+it, or has superseded it) and you therefore change no code, the first line
+of the decision file must instead be \`noop: <reason>\`, with the reason on
+that one line. A result that changes nothing outside \`.nqaf/\` without that
+line is treated as a lost feature."
+
 # carry_feature <prompt> — adds one "Apply <prompt>" commit on HEAD: the
-# stored patch if it applies cleanly and its prompt is unchanged, else the
-# agent's repair, update or fresh implementation. Exports the commit back to
+# stored patch if it applies cleanly, its prompt is unchanged and it is not
+# hollow (only .nqaf/, with no noop= in its .base), else the agent's repair,
+# update, verification or fresh implementation. Exports the commit back to
 # PATCHES_DIR and records the outcome.
 carry_feature() {
   local prompt="$1"
   local prompt_name feature patch base decision_file prompt_hash
-  local outcome="" path="" rationale="" prompt_changed state apply_log unmerged task decision
+  local outcome="" path="" rationale="" prompt_changed state apply_log unmerged task decision noop=""
   prompt_name="$(basename "$prompt")"
   feature="${prompt_name%.md}"
   patch="$PATCHES_DIR/$feature.patch"
@@ -136,11 +143,38 @@ been fully implemented.
 
 Do not commit. As your very last step, write \`.nqaf/decisions/$prompt_name\`:
 the first line is exactly \`new\`, followed by a short rationale (a few lines).
+$NOOP_RULE
 
 ---
 
 $(cat "$prompt")"
     outcome="new"
+
+  elif ! patch_touches_code "$patch" && [ -z "$(base_value "$base" noop)" ]; then
+    path="patch, hollow"
+    outcome="hollow"
+    echo "== $prompt_name: stored patch changes only .nqaf/ (hollow); running agent to verify or rebuild"
+    run_agent "A previous run recorded the feature prompt at the end of this message
+as applied, but its stored patch changes nothing outside \`.nqaf/\`:
+
+  $patch
+
+So either the feature was already present when it was applied, or the code
+change was lost. HEAD is the new upstream plus the features carried forward
+before this one.
+
+Your task: inspect the relevant code and determine whether the feature
+described below is fully present. If it is not (in whole or in part),
+implement it as described below.
+
+Do not commit. Ignore \`.nqaf/prompts/\`; the script maintains it. As your
+very last step, write your decision to \`.nqaf/decisions/$prompt_name\`: the
+first line is exactly \`rebuild\`, followed by a short rationale (a few lines).
+$NOOP_RULE
+
+---
+
+$(cat "$prompt")"
 
   else
     prompt_changed=0
@@ -222,6 +256,7 @@ Your task: $task
 $START_OVER_RULE As your very last step, write your decision to
 \`.nqaf/decisions/$prompt_name\`: the first line is exactly \`repair\` or
 \`rebuild\`, followed by a short rationale (a few lines).
+$NOOP_RULE
 
 ---
 
@@ -241,6 +276,12 @@ $(cat "$prompt")"
       repair) outcome="repaired" ;;
       rebuild) outcome="rebuilt" ;;
       new) outcome="new" ;;
+      noop:?*)
+        outcome="noop"
+        noop="$(noop_reason "$decision_file")"
+        rationale="noop: $noop${rationale:+
+$rationale}"
+        ;;
       *) [ -n "$outcome" ] || outcome="unknown" ;;
     esac
     rm -rf "$WORK_DIR/.nqaf/decisions"
@@ -257,7 +298,9 @@ $(cat "$prompt")"
     git -C "$WORK_DIR" commit -q -m "Apply $prompt_name"
   fi
 
-  export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "$upstream_head"
+  if ! export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "$upstream_head" "$noop"; then
+    outcome="$outcome (NO CODE CHANGES; patch not exported)"
+  fi
 
   names+=("$prompt_name")
   outcomes+=("$outcome")
@@ -339,7 +382,7 @@ write_pr_body() {
       echo "| \`${names[$i]}\` | ${paths[$i]} | **${outcomes[$i]}** |"
     done
     echo
-    echo "Outcomes: **clean** = stored patch applied with no agent; **repaired** = agent fixed up the stored patch; **rebuilt** = agent re-implemented from the prompt; **new** = no stored patch, implemented from the prompt."
+    echo "Outcomes: **clean** = stored patch applied with no agent; **repaired** = agent fixed up the stored patch; **rebuilt** = agent re-implemented from the prompt; **new** = no stored patch, implemented from the prompt; **noop** = agent found the feature already present upstream or superseded, so only the prompt is recorded (with \`noop=\` in its \`.base\`). Path **patch, hollow** = the stored patch changed only \`.nqaf/\`, so the agent verified or rebuilt the feature instead of replaying it."
     echo
     echo "## Decisions"
     for i in "${!names[@]}"; do

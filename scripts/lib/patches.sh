@@ -18,30 +18,41 @@ sha256_of() {
 # A prompt applied again on a branch that already had it produces a commit
 # that is only the delta over the earlier application. Walking back along
 # first parents, if every commit down to the first application is either an
-# "Apply <prompt-name>" commit or touches no files, this builds (with
-# commit-tree, so no ref changes) one commit with the last application's tree
-# on the first application's parent. If another commit sits in between, the
+# "Apply <prompt-name>" commit or transparent (touches no files, or only
+# .nqaf/prompts/<prompt-name>, such as a commit that deletes the prompt to
+# force a re-apply), this builds (with commit-tree, so no ref changes) one
+# commit with the last application's tree on the first application's parent.
+# If another commit sits in between while the prompt is still recorded, the
 # feature can't be isolated, so it prints <commit> unchanged and warns.
 combine_applications() {
   local work="$1" last="$2" name="$3"
-  local first="$last" p subject count=1
+  local first="$last" p subject blocker count=1
 
-  # first's parent already carries this prompt: find the previous application.
-  while git -C "$work" cat-file -e "$first^:.nqaf/prompts/$name" 2>/dev/null; do
+  while git -C "$work" rev-parse -q --verify "$first^" >/dev/null; do
     p="$(git -C "$work" rev-parse "$first^")"
+    blocker=""
     while :; do
       subject="$(git -C "$work" log -1 --format=%s "$p")"
       [ "$subject" = "Apply $name" ] && break
       if git -C "$work" rev-parse -q --verify "$p^2" >/dev/null \
-         || ! git -C "$work" diff --quiet "$p^" "$p" 2>/dev/null; then
+         || ! git -C "$work" rev-parse -q --verify "$p^" >/dev/null \
+         || ! git -C "$work" diff --quiet "$p^" "$p" -- . ":(exclude).nqaf/prompts/$name"; then
+        blocker="$p"
+        break
+      fi
+      p="$(git -C "$work" rev-parse "$p^")"
+    done
+    if [ -n "$blocker" ]; then
+      # first's parent still carries this prompt, so first is only a delta.
+      if git -C "$work" cat-file -e "$first^:.nqaf/prompts/$name" 2>/dev/null; then
         echo "Warning: ${name%.md}.patch is incremental over an earlier application of $name," \
-          "and can't be combined with it because $(git -C "$work" rev-parse --short "$p")" \
+          "and can't be combined with it because $(git -C "$work" rev-parse --short "$blocker")" \
           "('$subject') sits between them; re-apply will likely need the agent to repair it" >&2
         echo "$last"
         return
       fi
-      p="$(git -C "$work" rev-parse "$p^")"
-    done
+      break
+    fi
     first="$p"
     count=$((count + 1))
   done
@@ -64,21 +75,63 @@ combine_applications() {
     git -C "$work" commit-tree "$last^{tree}" -p "$first^" -m "Apply $name"
 }
 
-# export_patch <work-dir> <commit> <prompt-name> <patches-dir> [upstream-sha]
+# Paths that are bookkeeping, not the feature: the .nqaf/ prompt records and
+# per-checkout agent settings. A change that touches nothing else is "hollow".
+CODE_PATHSPEC=(. ':(exclude).nqaf' ':(exclude).claude')
+
+# commit_touches_code <work-dir> <commit> — true if <commit> changes anything
+# outside CODE_PATHSPEC's exclusions.
+commit_touches_code() {
+  ! git -C "$1" diff --quiet "$2^" "$2" -- "${CODE_PATHSPEC[@]}"
+}
+
+# patch_touches_code <patch-file> — true if the stored patch changes any file
+# outside .nqaf/ and .claude/.
+patch_touches_code() {
+  local stat
+  stat="$(git apply --numstat --exclude='.nqaf/*' --exclude='.claude/*' "$1" 2>/dev/null || true)"
+  [ -n "$stat" ]
+}
+
+# noop_reason <decision-file> — prints the reason from the file's first
+# `noop: <reason>` line, or nothing. An agent writes one when the feature is
+# already present upstream or superseded, so a change touching only .nqaf/
+# is intended.
+noop_reason() {
+  [ -f "$1" ] || return 0
+  sed -n 's/^noop:[[:space:]]*//p' "$1" | head -n1
+}
+
+# export_patch <work-dir> <commit> <prompt-name> <patches-dir> [upstream-sha] [noop-reason]
 #
 # Writes <patches-dir>/feature-NNN.patch (format-patch of <commit>, combined
 # with earlier applications of the same prompt where possible — see
 # combine_applications) and feature-NNN.base (parent=, upstream=,
-# prompt-sha256=). The prompt hash is taken from the .nqaf/prompts/<prompt-name>
+# prompt-sha256=, noop=). The prompt hash is taken from the .nqaf/prompts/<prompt-name>
 # copy inside <commit>, so it describes exactly the prompt that commit was
 # produced from. If no upstream sha is given, it falls back to the merge-base
 # with upstream/HEAD when that ref exists, and is omitted otherwise.
+#
+# A hollow commit (see CODE_PATHSPEC) is exported only with a noop reason:
+# the one given, else the noop= already in the existing .base. Otherwise it
+# writes nothing and returns 1. noop= is recorded only for hollow commits.
 export_patch() {
-  local work="$1" commit="$2" name="$3" dir="$4" upstream="${5:-}"
+  local work="$1" commit="$2" name="$3" dir="$4" upstream="${5:-}" noop="${6:-}"
   local feature="${name%.md}"
   local parent hash
 
   commit="$(combine_applications "$work" "$commit" "$name")"
+  if commit_touches_code "$work" "$commit"; then
+    noop=""
+  else
+    [ -n "$noop" ] || noop="$(base_value "$dir/$feature.base" noop)"
+    if [ -z "$noop" ]; then
+      echo "Error: not exporting $feature.patch: $(git -C "$work" rev-parse --short "$commit")" \
+        "changes only .nqaf/ (no code), and there is no noop reason saying why" >&2
+      return 1
+    fi
+    echo "Note: $feature.patch changes only .nqaf/; recording noop=$noop" >&2
+  fi
   mkdir -p "$dir"
   # .claude/ holds per-checkout agent settings; older forks committed it, but
   # it never belongs in a stored patch.
@@ -95,6 +148,7 @@ export_patch() {
     echo "parent=$parent"
     [ -n "$upstream" ] && echo "upstream=$upstream"
     echo "prompt-sha256=$hash"
+    if [ -n "$noop" ]; then echo "noop=$noop"; fi
   } > "$dir/$feature.base"
 
   echo "Exported $feature.patch (+ .base) from $(git -C "$work" rev-parse --short "$commit")"

@@ -26,7 +26,10 @@ Each top-level directory (e.g. `obscura/`, `postgresparser/`,
   `key=value` lines: `parent=` (the commit the patch was applied on),
   `upstream=` (the upstream commit it was built against, when known) and
   `prompt-sha256=` (hash of the prompt that produced it — `re-apply` compares
-  this against the current prompt to tell whether the prompt changed).
+  this against the current prompt to tell whether the prompt changed). A
+  patch that changes nothing outside `.nqaf/` is *hollow*; the scripts store
+  one only with a `noop=<reason>` line, which says that the feature is
+  already present upstream or superseded rather than lost.
 - `check` (optional) — a shell command run in `work/` to verify the fork
   after `re-apply`. Without it, `re-apply` falls back to `make test` if the
   fork's Makefile has a `test` target, else reports the result as
@@ -77,12 +80,15 @@ it from the fork yourself.
    at a time. Each prompt first has the agent check whether the fix is
    already present in the code (it may have been applied in an earlier run
    or merged in from upstream) before deciding whether to actually change
-   anything; either way, the prompt gets recorded in `.nqaf/prompts/` in the
-   fork so future runs on this branch can skip it. After each prompt,
-   **any resulting changes are committed as `Apply <prompt>` and pushed to
-   `<branch>` on origin immediately** — so progress survives even if a later
-   prompt in the same run fails — and that commit is exported to
-   `patches/`. Once at least one prompt has run, it uses `gh` to
+   anything. If it changes no code, it must say why by writing
+   `.nqaf/decisions/<prompt>` with a line `noop: <reason>`; a prompt that
+   changes nothing outside `.nqaf/` without that line stops the run with an
+   error and is not recorded as applied. Otherwise the prompt gets recorded
+   in `.nqaf/prompts/` in the fork so future runs on this branch can skip
+   it. After each prompt, **the result is committed as `Apply <prompt>` and
+   pushed to `<branch>` on origin immediately** — so progress survives even
+   if a later prompt in the same run fails — and that commit is exported to
+   `patches/` (a no-op commit with `noop=<reason>` in its `.base`). Once at least one prompt has run, it uses `gh` to
    open a PR from `<branch>` into the fork's default branch (skipped if a
    PR already exists for that branch, or if `gh` isn't installed/authed).
    Use this:
@@ -95,8 +101,10 @@ it from the fork yourself.
    carries it, the new commit is only the delta over the earlier
    application. When exporting (here and in `export-patches`), every
    `Apply <prompt>` commit for that prompt is combined into one patch, as
-   long as nothing but those commits (or empty commits) sits between the
-   first and the last. If another feature's commit sits between them, only
+   long as nothing but those commits (or empty commits, or commits that only
+   delete or re-add `.nqaf/prompts/<prompt>`, such as "Removing <prompt> to
+   force re-apply") sits between the first and the last. If another
+   feature's commit sits between them, only
    the latest delta is exported, with a warning that names the commit in the
    way; `re-apply` will then likely need the agent to repair that patch.
    Prefer `re-apply` for changed prompts, which always produces one whole
@@ -113,6 +121,9 @@ it from the fork yourself.
    merged PR that contains an `Apply <prompt>` commit. For those, `parent=`
    is the pre-squash parent, which isn't on the default branch. Prompts
    found nowhere are skipped with a warning; `re-apply` treats them as new.
+   A hollow commit (only `.nqaf/`) is not exported unless the existing
+   `.base` already has `noop=`; the stored patch is left as it was, and the
+   script exits non-zero after the other prompts.
 
    **`scripts/export-all-patches [<fork-dir> ...]`** runs `export-patches`
    for every tracked fork (each top-level directory with a `fork.txt`), in
@@ -137,18 +148,25 @@ it from the fork yourself.
      `.base`): the old patch is applied the same way (clean or conflicted),
      then the agent is told the prompt changed and updates the carried-forward
      change to satisfy the new prompt — same 60% start-over rule.
+   - **Patch stored but hollow** (it changes only `.nqaf/`, and its `.base`
+     has no `noop=`): not replayed. The agent checks whether the feature is
+     present and implements it if not. Path *patch, hollow*.
    - **No patch**: the agent implements from the prompt, as `apply` does.
 
    The agent records its choice in `.nqaf/decisions/<prompt>` (`repair`,
-   `rebuild` or `new`, plus a short rationale); those files are reported in
-   the PR and never committed. Each feature becomes one `Apply <prompt>`
+   `rebuild` or `new`, plus a short rationale, or `noop: <reason>` when the
+   feature is already present upstream or superseded and it changed no
+   code); those files are reported in the PR and never committed. A
+   `noop:` reason is written to the `.base` as `noop=<reason>`. If a feature
+   still ends up with no code change and no `noop:`, its patch is not
+   exported and its outcome is flagged in the PR. Each feature becomes one `Apply <prompt>`
    commit, and its patch and `.base` are exported back to `patches/`.
 
    After all prompts, it runs the check once (`<fork-dir>/check`, else
    `make test`, else *unverified* — a fork without tests doesn't fail the
    run). It then pushes the branch to origin and opens a PR into the fork's
    default branch whose body lists each feature's outcome
-   (clean/repaired/rebuilt/new), the agent's rationales, and the check
+   (clean/repaired/rebuilt/new/noop), the agent's rationales, and the check
    result. The PR is opened even when the check fails, with a warning at the
    top of the body and in the title, and the script exits 3 (other errors
    exit 1). `--no-push` skips the push and PR and just writes the PR body to

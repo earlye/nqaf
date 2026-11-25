@@ -5,6 +5,7 @@ set -euo pipefail
 # scripts/apply started exporting patches. For each prompt, exports the most
 # recent "Apply <prompt>" commit reachable from the fork's default branch, or,
 # failing that, from the head of the newest merged PR that contains one.
+# Exits non-zero if any prompt's commit was refused as hollow.
 
 [ "$#" -eq 1 ] || { echo "Usage: export-patches <fork-dir>" >&2; exit 1; }
 FORK_DIR="$1"
@@ -72,6 +73,7 @@ load_pr_refs() {
 }
 
 missing=0
+hollow=0
 for prompt in "$CONFIG_DIR/prompts/"*.md; do
   prompt_name="$(basename "$prompt")"
   commit="$(find_apply_commit "origin/$default_branch" "$prompt_name")"
@@ -94,11 +96,19 @@ for prompt in "$CONFIG_DIR/prompts/"*.md; do
     continue
   fi
   # For a squash-merged PR, parent= is the pre-squash parent, which isn't on
-  # the default branch; it is recorded as-is.
-  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR"
+  # the default branch; it is recorded as-is. A hollow commit (only .nqaf/)
+  # is refused unless its .base already has noop=, leaving the stored patch
+  # as it was.
+  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR" || hollow=$((hollow + 1))
 done
 
 if [ "$missing" -gt 0 ]; then
   echo "$missing prompt(s) had no matching commit anywhere (never applied?); re-apply will treat them as new." >&2
 fi
+if [ "$hollow" -gt 0 ]; then
+  echo "$hollow prompt(s) were not exported because their commit changes only .nqaf/ (hollow)." \
+    "Find the application that holds the real change, or add noop=<reason> to the .base if the" \
+    "feature is genuinely already present upstream." >&2
+fi
 echo "Done. Review and commit $PATCHES_DIR in this repo."
+[ "$hollow" -eq 0 ]
