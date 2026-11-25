@@ -1,6 +1,6 @@
 # Stop `op_variable` (and `bind_at`) from copying bound parameters
 
-## Problem [feature-002]
+## Problem [feature-004]
 
 Every bound parameter is copied in full before `MakeRecord` serializes it
 into the record. For a prepared insert that is bound, stepped, reset and
