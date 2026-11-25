@@ -51,7 +51,22 @@ The new parser seems to have dropped the `ORDER BY`/`LIMIT` grammar on
 `DELETE`. That probably came in with the upstream re-mirror in fork
 commit `1ccaf5c09`, which was carried onto upstream `8cc059bd9`.
 
-## Options (the choice is open until Early decides)
+## Decision
+
+Option (a), decided 2026-11-25. Option (b) is tracked separately in
+`issues/issue-01a213d0-9ec4-7385-9962-480591c54170-turso-support-delete-order-by-limit.md`.
+
+The fix is a new prompt, `turso/prompts/feature-006.md`, applied with the
+usual scripts:
+
+- Refuse in the parser, so that nothing can run before the error.
+- The error text is `ORDER BY clause is not supported in DELETE`, which
+  matches the message at `4b59a37`.
+- `DELETE ... LIMIT n` without ORDER BY is also refused, with an error
+  that names LIMIT. It has the same unordered-delete hazard.
+- Add a turso_core unit test for both cases, and add it to `turso/check`.
+
+## Options considered
 
 Either option satisfies event-sorcerer:
 
@@ -95,3 +110,13 @@ at about lines 380–460.
   parser grammar for `order_by` and `limit` on `Stmt::Delete`
 - turso fork commit `1ccaf5c09`: the suspected re-mirror that dropped
   the grammar
+
+## Grill Log
+
+### 2026-11-25
+
+- Q: Refuse with an error naming ORDER BY (a), or support the statement (b)?
+  Defaults proposed for (a): refuse in the parser, reuse the old message,
+  also refuse `DELETE ... LIMIT` with an error naming LIMIT, add a unit test
+  to `turso/check`. — A: (a) for now, with the proposed defaults. Track (b)
+  as its own issue (`turso-support-delete-order-by-limit`).
