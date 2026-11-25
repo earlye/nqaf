@@ -24,9 +24,9 @@ publish = false
 
 [dependencies]
 # Pinned to a commit on the fork's unmerged `feature-006` branch that has the
-# fix from turso/prompts/feature-006.md, so that claim 4b runs against that fix
-# before the branch merges into the fork's main. After it merges, remove `rev` so that the crate
-# follows the fork's main again.
+# fix from turso/prompts/feature-006.md, so that claim 4b runs against that
+# fix before the branch merges into the fork's main. After it merges, remove
+# `rev` so that the crate follows the fork's main again.
 turso_core = { git = "https://github.com/earlye-forks/turso.git", rev = "402022b21349ca76a35fbd5916293dee662575c8" }
 
 [dev-dependencies]
