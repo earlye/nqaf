@@ -1,0 +1,1086 @@
+From 9342a76ff2888c66ea7e52d9a93c193eb15fbc7f Mon Sep 17 00:00:00 2001
+From: Early Ehlinger <earlye@triple-e-macbook>
+Date: Tue, 24 Nov 2026 23:36:18 -0600
+Subject: [PATCH] Apply feature-004.md
+
+---
+ .nqaf/prompts/feature-004.md      | 166 +++++++++++++++++++++
+ README.md                         |   1 +
+ core/incremental/expr_compiler.rs |   9 +-
+ core/index_method/fts/mod.rs      |  32 ++--
+ core/lib.rs                       |   2 +
+ core/param_sharing_tests.rs       | 208 ++++++++++++++++++++++++++
+ core/statement.rs                 |   6 +-
+ core/vdbe/execute.rs              | 240 +++++++++++++++++++-----------
+ core/vdbe/mod.rs                  |  88 +++++++----
+ 9 files changed, 618 insertions(+), 134 deletions(-)
+ create mode 100644 .nqaf/prompts/feature-004.md
+ create mode 100644 core/param_sharing_tests.rs
+
+diff --git a/.nqaf/prompts/feature-004.md b/.nqaf/prompts/feature-004.md
+new file mode 100644
+index 000000000..379b5af7f
+--- /dev/null
++++ b/.nqaf/prompts/feature-004.md
+@@ -0,0 +1,166 @@
++# Stop `op_variable` (and `bind_at`) from copying bound parameters
++
++## Problem [feature-004]
++
++Every bound parameter is copied in full before `MakeRecord` serializes it
++into the record. For a prepared insert that is bound, stepped, reset and
++bound again in a loop, a blob payload is copied three times per execution:
++
++1. **At bind time.** `ProgramState::bind_at` (`core/vdbe/mod.rs` ~892-911):
++   when the slot already holds a Text or Blob (it does after the first
++   execution, because bindings survive `reset()`), it calls
++   `existing.do_extend(&new)`. That copies the caller's bytes into the old
++   buffer and then drops the caller's `Vec`.
++2. **At `Variable`.** `op_variable` (`core/vdbe/execute.rs` ~13285-13295)
++   does `registers[dest].set_value(state.get_parameter(index))`, and
++   `get_parameter` (`core/vdbe/mod.rs` ~917-920) is
++   `self.parameters.get(i).cloned()`.
++3. **Into the record.** `make_record` serializes the register value into the
++   record buffer. This copy is unavoidable and stays.
++
++Remove copies 1 and 2, so that serializing into the record is the only copy
++of a bound Text or Blob payload, unless an instruction has to change the
++value itself (for example, affinity that turns Text into a number).
++
++Code locations are hints, relative to upstream rev `4b59a37`. Line numbers
++have probably drifted; search by name.
++
++### Facts the fix must respect
++
++- `Value` (`core/types.rs` ~264-271) is
++  `Null | Numeric | Text(Text) | Blob(Vec<u8>)`. `Text` holds a
++  `Cow<'static, str>`. Nothing in `Value` is shared or refcounted.
++- `Register` (`core/vdbe/mod.rs` ~254-260) is
++  `Value(Value) | Aggregate(AggContext) | Record(ImmutableRecord)`.
++  `Register::get_value(&self) -> &Value` (~1334-1344) already returns a
++  reference into a non-`Value` variant (`Record` returns its payload), and
++  `make_record` / `ImmutableRecord::from_registers` read registers only
++  through `get_value()`.
++- **Bindings persist across `Statement::reset()`.** `ProgramState::reset`
++  never touches `parameters`; only `clear_bindings` clears them. Reprepare
++  (`core/statement.rs` ~890-907) saves and restores them with `mem::take`,
++  and `reset_for_subprogram_reuse` keeps them. A re-run without rebinding
++  must see the same values.
++- **One parameter can be read many times per execution.** The translator
++  emits one `Insn::Variable` per occurrence (`?1 ... ?1` reads the slot
++  twice), and the many `translate_expr_no_constant_opt` call sites (INSERT,
++  multi-row VALUES, UPDATE SET, ...) run `Variable` once per row. Trigger
++  bodies read NEW/OLD values as parameters that are rebound for every row
++  (`core/translate/trigger_exec.rs`, `core/vdbe/execute.rs` ~4725-4731).
++- Some code mutates registers in place: `apply_affinity_char` (called by
++  `op_make_record` for every column of every INSERT into a table with an
++  affinity string, and by `Insn::Affinity`) can rewrite Text to a number,
++  and there are a handful of other `if let Register::Value(..)` /
++  `&mut state.registers[..]` sites in `execute.rs` and `mod.rs`. Most calls
++  to `apply_affinity_char` change nothing: it returns early for Blob and
++  Null, and leaves Text alone under Text affinity.
++
++So a plain move of the value out of its slot is wrong: it breaks both
++persistence across reset and repeated reads. Do not do that, and do not
++add translator analysis to prove "read exactly once".
++
++## Fix
++
++Share the parameter value between its slot and the registers that read it.
++
++- Store parameters as `Vec<Arc<Value>>`.
++- Add a register variant that holds a shared value, e.g.
++  `Register::Shared(Arc<Value>)`. `op_variable` stores a clone of the
++  slot's `Arc` (a refcount bump, no payload copy). `get_value()` returns
++  `&**arc` for it.
++- `bind_at` moves the caller's `Value` into the slot instead of calling
++  `do_extend`. When no register holds the slot's `Arc` (the usual case:
++  `reset()` sets every register to Null), overwrite the value in place
++  through `Arc::get_mut`, so a numeric rebind still allocates nothing.
++  Otherwise put the value in a new `Arc`; the register keeps the old value,
++  which is correct and needs no unsafe code. `clear_bindings` and
++  reprepare keep working on the new slot type.
++- A place that mutates a register in place must turn a shared register
++  into an owned `Register::Value` (e.g. with `Arc::unwrap_or_clone`)
++  before it mutates, so that it never mutates the parameter slot. **Unshare
++  only on the branch that actually changes the value**: decide through
++  `get_value()` first. This matters most for `apply_affinity_char` (see
++  above): unsharing at its top would copy every bound blob again and undo
++  this change.
++- Audit every match on `Register::Value(..)` across the whole workspace
++  (e.g. `rg 'Register::Value\(' --type rust`, which at `4b59a37` also hits
++  `core/storage/btree.rs`, `core/functions/printf.rs`, `core/vdbe/value.rs`,
++  `core/vdbe/array.rs`, `core/index_method/fts.rs`,
++  `core/incremental/expr_compiler.rs` and `tests/integration`).
++  Start with `Row::get` and `Row::get_value` in `core/vdbe/mod.rs`
++  (~2887-2912): every result column is read through them, and today they
++  hit `unreachable!` on any register that isn't `Register::Value`. Other
++  missed matches would make a shared register silently fall through to the
++  wrong arm (for example, treat a Text value as not-text). Rewrite
++  read-only matches to go through `get_value()`. Add a `Shared` arm only
++  where the match must mutate or must tell the variants apart.
++- Anything that clones a whole `Register` (it derives `Clone` and
++  `PartialEq`) should keep working; cloning a shared register clones the
++  `Arc`. `PartialEq` must compare by value, so a shared register equals an
++  owned register that holds an equal value.
++
++Do not change `Value`'s public shape, the public `Statement::bind_at`
++signature, or the record format. Do not make `bind_at` borrow
++(`ValueRef`): the slot has to own the value so that it survives
++`reset()`, so borrowing would only move the copy somewhere else.
++
++Leave the trigger path at `core/vdbe/execute.rs` ~4725-4731 (which clones
++each parent register into the child program's parameters) as it is.
++
++## Regression tests
++
++Add tests in `core` as `#[cfg(test)] mod param_sharing_tests;` in
++`core/lib.rs` (keep that module name: nqaf's `turso/check` runs it by
++name), using `turso_core::Statement` directly, because the SDK
++layers convert values:
++
++1. **Variable does not copy.** Prepare `SELECT ?1, ?1`. Build
++   `Value::Blob(vec![7; 1 << 20])`, record the `Vec`'s `as_ptr()`, and bind
++   it. Step, and assert that both result columns are `Value::Blob` with that
++   same pointer and the same bytes. (This fails today because of the clone.)
++2. **Persistence across reset.** `reset()`, step again without rebinding,
++   and assert the same bytes and pointer.
++3. **Rebind moves.** `reset()`, rebind slot 1 with a new blob `Vec`, record its
++   pointer, step, and assert the new pointer and bytes. (This fails today
++   because of `do_extend`.)
++4. **Text too.** Repeat 1-3 for a large `Text` value built from an owned
++   `String`.
++5. **In-place mutation does not leak into the slot.** With
++   `CREATE TABLE t(n INTEGER, s)` (`s` has no affinity), prepare
++   `INSERT INTO t VALUES (?1, ?1)`, bind the text `'42'`, step, `reset()`
++   and step again without rebinding. `SELECT typeof(n), n, typeof(s), s
++   FROM t` returns `integer, 42, text, '42'` for both rows: the numeric
++   affinity applied to `n` changed neither `s` nor the parameter seen by
++   the second execution.
++6. **`clear_bindings`** after reset makes the parameter read as NULL.
++7. **Insert round-trip.** With `CREATE TABLE b(x BLOB)`, bind a 1 MB blob
++   into `INSERT INTO b VALUES (?1)`, reset and rebind several times with
++   different blobs, then read all rows back and compare bytes.
++8. **Affinity does not unshare.** In a nested
++   `mod param_sharing_tests` inside `core/vdbe/execute.rs`'s own
++   `mod tests` (`apply_affinity_char` is private; keep that nested name so
++   that `turso/check`'s filter matches it too), show that applying it to a
++   shared register leaves the register shared (same `Arc`) for a Blob under
++   any affinity, and for a Text under Text affinity, and that it unshares
++   and converts a Text `'42'` under Integer affinity without changing the
++   `Arc`'s value.
++
++## Constraints
++
++- Keep the diff focused on this change. Follow turso's existing code style,
++  error handling and naming. No unrelated refactors.
++- Do not add unsafe code for this.
++- Run `cargo fmt`, `cargo clippy -p turso_core`, the new tests, and the
++  existing `turso_core` lib tests that exercise statements, triggers,
++  VACUUM and the VDBE (`cargo test -p turso_core --lib`). Also
++  `cargo check` the workspace crates outside `core` that use `Register`
++  (at `4b59a37`: `tests/integration`). Do not run the full `make test`.
++
++## Update README
++
++Under "Fork Features" in the "About This Fork" section of `README.md`
++(added by feature-000 and feature-001; create the subsection if it is
++missing), add a bullet: bound Text and Blob parameters are shared with the
++registers that read them instead of copied, so binding and reading a
++parameter no longer copies its payload. Serializing into the record is
++the only copy, unless an instruction has to change the value.
+diff --git a/README.md b/README.md
+index c2547de6c..446730c71 100644
+--- a/README.md
++++ b/README.md
+@@ -41,6 +41,7 @@ If you are re-mirroring this fork from a newer upstream release, see the fork's
+ * **Orphan-WAL policy.** `DatabaseOpts::with_orphan_wal_policy` takes an `OrphanWalPolicy`. The default, `Replay`, keeps upstream behaviour. `Discard { empty, read_only }` makes a read-write open throw away a leftover `-wal` that sits beside a database file holding no database (absent or 0 bytes; optionally also 1 byte, or any file without a valid page-1 header), by truncating it to 0 bytes through the supplied `IO`, instead of letting it bring an old database back. Read-only opens never modify files: they either ignore the WAL or replay it as upstream does, and fail on an invalid header. In multiprocess WAL mode the open fails rather than discard while another process is attached. Under `Discard`, page 1 of a new database is fsynced, and its parent directory synced, before the first WAL frame is written. Under `Discard`, opens that bypass the in-process registry (`Database::do_open`/`do_open_async`) fail, so the sync engine, which reopens databases through that path, cannot be combined with `Discard`.
+ * **`IO::sync_parent_dir`** is a new required method on the `IO` trait (an **IO extension**; see [docs/adr/0001-io-extensions-are-required-trait-methods.md](docs/adr/0001-io-extensions-are-required-trait-methods.md)). It makes a file's directory entry durable. Out-of-tree `IO` implementations must now implement it; an IO that cannot provide it returns `LimboError::IoExtensionUnsupported`, and `OrphanWalPolicy::Discard` then refuses to open an empty database on it.
+ * **GitHub-hosted CI.** CI runs on GitHub-hosted runners instead of Blacksmith, and jobs that need upstream secrets or publish/deploy run only in `tursodatabase/turso`.
++* **Bound parameters are shared, not copied.** Bound Text and Blob parameters are shared with the registers that read them instead of copied, so binding a parameter and reading it (even several times, or again after `Statement::reset`) no longer copies its payload. Serializing the value into the record is the only copy, unless an instruction has to change the value (for example, when column affinity turns the text `'42'` into an integer).
+ 
+ ## About
+ 
+diff --git a/core/incremental/expr_compiler.rs b/core/incremental/expr_compiler.rs
+index 1ef135cc1..3fab8ed2b 100644
+--- a/core/incremental/expr_compiler.rs
++++ b/core/incremental/expr_compiler.rs
+@@ -422,10 +422,11 @@ impl CompiledExpression {
+                 }
+ 
+                 // The compiled expression puts the result in register 0
+-                match state.get_register(0) {
+-                    Register::Value(v) => Ok(v.clone()),
+-                    _ => Ok(Value::Null),
+-                }
++                Ok(state
++                    .get_register(0)
++                    .as_value()
++                    .cloned()
++                    .unwrap_or(Value::Null))
+             }
+         }
+     }
+diff --git a/core/index_method/fts/mod.rs b/core/index_method/fts/mod.rs
+index c843f0cff..e2a799c1b 100644
+--- a/core/index_method/fts/mod.rs
++++ b/core/index_method/fts/mod.rs
+@@ -2932,8 +2932,8 @@ impl IndexMethodCursor for FtsCursor {
+         let rowid_reg = values.last().ok_or_else(|| {
+             LimboError::InternalError("FTS insert requires at least rowid".into())
+         })?;
+-        let rowid = match rowid_reg {
+-            Register::Value(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
++        let rowid = match rowid_reg.as_value() {
++            Some(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
+             _ => {
+                 return Err(LimboError::InternalError("FTS rowid must be integer".into()).into());
+             }
+@@ -2943,20 +2943,20 @@ impl IndexMethodCursor for FtsCursor {
+         doc.add_i64(self.rowid_field, rowid);
+ 
+         for ((_col, field), reg) in self.text_fields.iter().zip(&values[..values.len() - 1]) {
+-            match reg {
+-                Register::Value(Value::Text(t)) => {
++            match reg.as_value() {
++                Some(Value::Text(t)) => {
+                     doc.add_text(*field, t.as_str());
+                 }
+-                Register::Value(Value::Null) => continue,
++                Some(Value::Null) => continue,
+                 // Coerce every non-NULL value to text before tokenizing, the
+                 // way FTS5's sqlite3_value_text() does. Skipping them would
+                 // make the index silently miss rows a plain scan matches.
+-                Register::Value(value) => {
++                Some(value) => {
+                     if let Some(text) = value.cast_text() {
+                         doc.add_text(*field, &text);
+                     }
+                 }
+-                _ => continue,
++                None => continue,
+             }
+         }
+ 
+@@ -2980,8 +2980,8 @@ impl IndexMethodCursor for FtsCursor {
+         let rowid_reg = values.last().ok_or_else(|| {
+             LimboError::InternalError("FTS delete requires at least rowid".into())
+         })?;
+-        let rowid = match rowid_reg {
+-            Register::Value(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
++        let rowid = match rowid_reg.as_value() {
++            Some(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
+             _ => {
+                 return Err(LimboError::InternalError("FTS rowid must be integer".into()).into());
+             }
+@@ -3032,8 +3032,8 @@ impl IndexMethodCursor for FtsCursor {
+         }
+ 
+         // values[0] = pattern index
+-        let pattern_idx = match &values[0] {
+-            Register::Value(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
++        let pattern_idx = match values[0].as_value() {
++            Some(Value::Numeric(crate::numeric::Numeric::Integer(i))) => *i,
+             _ => FTS_PATTERN_SCORE,
+         };
+         self.current_pattern = pattern_idx;
+@@ -3050,14 +3050,12 @@ impl IndexMethodCursor for FtsCursor {
+                 // Coerce with the same rules as a plain LIMIT (MustBeInt):
+                 // numeric text and integral reals become integers; anything
+                 // else is a datatype mismatch, never a silent default.
+-                let coerced = match &values[2] {
+-                    Register::Value(Value::Numeric(crate::numeric::Numeric::Integer(i))) => {
+-                        Some(*i)
+-                    }
+-                    Register::Value(Value::Numeric(crate::numeric::Numeric::Float(f))) => {
++                let coerced = match values[2].as_value() {
++                    Some(Value::Numeric(crate::numeric::Numeric::Integer(i))) => Some(*i),
++                    Some(Value::Numeric(crate::numeric::Numeric::Float(f))) => {
+                         crate::util::cast_real_to_integer(f64::from(*f)).ok()
+                     }
+-                    Register::Value(Value::Text(text)) => {
++                    Some(Value::Text(text)) => {
+                         match crate::util::checked_cast_text_to_numeric(text.as_str(), true) {
+                             Ok(Value::Numeric(crate::numeric::Numeric::Integer(i))) => Some(i),
+                             Ok(Value::Numeric(crate::numeric::Numeric::Float(f))) => {
+diff --git a/core/lib.rs b/core/lib.rs
+index 998dd8bda..2b942f562 100644
+--- a/core/lib.rs
++++ b/core/lib.rs
+@@ -36,6 +36,8 @@ pub mod native_ext;
+ pub mod numeric;
+ #[cfg(all(test, feature = "fs"))]
+ mod orphan_wal_tests;
++#[cfg(test)]
++mod param_sharing_tests;
+ pub mod schema;
+ pub mod skiplist;
+ pub mod state_machine;
+diff --git a/core/param_sharing_tests.rs b/core/param_sharing_tests.rs
+new file mode 100644
+index 000000000..7c16602c8
+--- /dev/null
++++ b/core/param_sharing_tests.rs
+@@ -0,0 +1,208 @@
++use std::num::NonZero;
++use std::sync::Arc;
++
++use crate::types::Text;
++use crate::{
++    Connection, Database, DatabaseOpts, MemoryIO, OpenFlags, SqliteDialect, Statement, Value, IO,
++};
++
++const LARGE: usize = 1 << 20;
++
++#[test]
++fn select_reads_a_bound_blob_without_copying_it() {
++    let conn = open_test_connection();
++    let mut stmt = conn.prepare("SELECT ?1, ?1").unwrap();
++
++    let first = crate::alloc::vec![7u8; LARGE];
++    let first_ptr = first.as_ptr();
++    stmt.bind_at(first_index(), Value::Blob(first)).unwrap();
++    assert_both_columns_are_blob(&mut stmt, first_ptr, 7);
++
++    stmt.reset().unwrap();
++    assert_both_columns_are_blob(&mut stmt, first_ptr, 7);
++
++    stmt.reset().unwrap();
++    let second = crate::alloc::vec![9u8; LARGE];
++    let second_ptr = second.as_ptr();
++    stmt.bind_at(first_index(), Value::Blob(second)).unwrap();
++    assert_both_columns_are_blob(&mut stmt, second_ptr, 9);
++}
++
++#[test]
++fn select_reads_a_bound_text_without_copying_it() {
++    let conn = open_test_connection();
++    let mut stmt = conn.prepare("SELECT ?1, ?1").unwrap();
++
++    let first = "a".repeat(LARGE);
++    let first_ptr = first.as_ptr();
++    stmt.bind_at(first_index(), Value::Text(Text::new(first)))
++        .unwrap();
++    assert_both_columns_are_text(&mut stmt, first_ptr, 'a');
++
++    stmt.reset().unwrap();
++    assert_both_columns_are_text(&mut stmt, first_ptr, 'a');
++
++    stmt.reset().unwrap();
++    let second = "b".repeat(LARGE);
++    let second_ptr = second.as_ptr();
++    stmt.bind_at(first_index(), Value::Text(Text::new(second)))
++        .unwrap();
++    assert_both_columns_are_text(&mut stmt, second_ptr, 'b');
++}
++
++#[test]
++fn integer_affinity_converts_a_shared_text_only_in_its_own_column() {
++    let conn = open_test_connection();
++    conn.execute("CREATE TABLE t(n INTEGER, s)").unwrap();
++    let mut insert = conn.prepare("INSERT INTO t VALUES (?1, ?1)").unwrap();
++    insert
++        .bind_at(first_index(), Value::build_text("42".to_string()))
++        .unwrap();
++    insert.run_ignore_rows().unwrap();
++    insert.reset().unwrap();
++    insert.run_ignore_rows().unwrap();
++
++    let rows = conn
++        .prepare("SELECT typeof(n), n, typeof(s), s FROM t")
++        .unwrap()
++        .run_collect_rows()
++        .unwrap();
++    let expected_row = vec![
++        Value::build_text("integer"),
++        Value::from_i64(42),
++        Value::build_text("text"),
++        Value::build_text("42"),
++    ];
++    assert_eq!(rows, vec![expected_row.clone(), expected_row]);
++}
++
++#[test]
++fn clear_bindings_after_reset_makes_the_parameter_null() {
++    let conn = open_test_connection();
++    let mut stmt = conn.prepare("SELECT ?1").unwrap();
++    stmt.bind_at(first_index(), Value::Blob(crate::alloc::vec![1u8; LARGE]))
++        .unwrap();
++    stmt.run_ignore_rows().unwrap();
++    stmt.reset().unwrap();
++    stmt.clear_bindings();
++
++    let row = stmt
++        .run_one_step_blocking(|| Ok(()), || Ok(()))
++        .unwrap()
++        .expect("SELECT returns one row");
++    assert_eq!(row.get_value(0), &Value::Null);
++}
++
++#[test]
++fn rebinding_large_blobs_inserts_each_one_intact() {
++    let conn = open_test_connection();
++    conn.execute("CREATE TABLE b(x BLOB)").unwrap();
++    let mut insert = conn.prepare("INSERT INTO b VALUES (?1)").unwrap();
++    let fills = [1u8, 2, 3, 4];
++    for fill in fills {
++        insert.reset().unwrap();
++        insert
++            .bind_at(first_index(), Value::Blob(crate::alloc::vec![fill; LARGE]))
++            .unwrap();
++        insert.run_ignore_rows().unwrap();
++    }
++
++    let rows = conn
++        .prepare("SELECT x FROM b ORDER BY rowid")
++        .unwrap()
++        .run_collect_rows()
++        .unwrap();
++    assert_eq!(rows.len(), fills.len());
++    for (row, fill) in rows.iter().zip(fills) {
++        let Value::Blob(bytes) = &row[0] else {
++            panic!("expected blob, got {:?}", row[0]);
++        };
++        assert_eq!(bytes.len(), LARGE);
++        assert!(bytes.iter().all(|b| *b == fill));
++    }
++}
++
++#[cfg(feature = "fts")]
++#[test]
++fn fts_indexes_and_matches_bound_text_parameters() {
++    let conn = open_connection_with_options(DatabaseOpts::new().with_index_method(true));
++    conn.execute("CREATE TABLE docs(id INTEGER PRIMARY KEY, body TEXT)")
++        .unwrap();
++    conn.execute("CREATE INDEX docs_fts ON docs USING fts(body)")
++        .unwrap();
++    let mut insert = conn.prepare("INSERT INTO docs VALUES (1, ?1)").unwrap();
++    insert
++        .bind_at(
++            first_index(),
++            Value::build_text("shared parameter text".to_string()),
++        )
++        .unwrap();
++    insert.run_ignore_rows().unwrap();
++
++    let mut query = conn
++        .prepare("SELECT id FROM docs WHERE fts_match(body, ?1)")
++        .unwrap();
++    query
++        .bind_at(first_index(), Value::build_text("parameter".to_string()))
++        .unwrap();
++    assert_eq!(
++        query.run_collect_rows().unwrap(),
++        vec![vec![Value::from_i64(1)]]
++    );
++}
++
++fn open_test_connection() -> Arc<Connection> {
++    open_connection_with_options(DatabaseOpts::new())
++}
++
++fn open_connection_with_options(options: DatabaseOpts) -> Arc<Connection> {
++    let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
++    let db = Database::open_file_with_flags(
++        io,
++        ":memory:",
++        OpenFlags::Create,
++        options,
++        None,
++        Arc::new(SqliteDialect),
++    )
++    .unwrap();
++    db.connect().unwrap()
++}
++
++fn first_index() -> NonZero<usize> {
++    NonZero::new(1).unwrap()
++}
++
++fn assert_both_columns_are_blob(stmt: &mut Statement, ptr: *const u8, fill: u8) {
++    let row = stmt
++        .run_one_step_blocking(|| Ok(()), || Ok(()))
++        .unwrap()
++        .expect("SELECT returns one row");
++    for column in 0..2 {
++        let Value::Blob(bytes) = row.get_value(column) else {
++            panic!("expected blob, got {:?}", row.get_value(column));
++        };
++        assert_eq!(bytes.as_ptr(), ptr, "column {column} copied the blob");
++        assert_eq!(bytes.len(), LARGE);
++        assert!(bytes.iter().all(|b| *b == fill));
++    }
++}
++
++fn assert_both_columns_are_text(stmt: &mut Statement, ptr: *const u8, fill: char) {
++    let row = stmt
++        .run_one_step_blocking(|| Ok(()), || Ok(()))
++        .unwrap()
++        .expect("SELECT returns one row");
++    for column in 0..2 {
++        let Value::Text(text) = row.get_value(column) else {
++            panic!("expected text, got {:?}", row.get_value(column));
++        };
++        assert_eq!(
++            text.as_str().as_ptr(),
++            ptr,
++            "column {column} copied the text"
++        );
++        assert_eq!(text.as_str().len(), LARGE);
++        assert!(text.as_str().chars().all(|c| c == fill));
++    }
++}
+diff --git a/core/statement.rs b/core/statement.rs
+index adac031e8..20d19e7bd 100644
+--- a/core/statement.rs
++++ b/core/statement.rs
+@@ -1467,9 +1467,9 @@ impl Statement {
+                 };
+                 max_index = max_index.max(index);
+                 let value = NonZero::new(index)
+-                    .map(|i| self.state.get_parameter(i))
+-                    .unwrap_or(Value::Null);
+-                append_expanded_literal(&mut out, &value);
++                    .and_then(|i| self.state.get_parameter(i))
++                    .map_or(&Value::Null, |parameter| &**parameter);
++                append_expanded_literal(&mut out, value);
+             } else {
+                 out.push_str(&String::from_utf8_lossy(token.value));
+             }
+diff --git a/core/vdbe/execute.rs b/core/vdbe/execute.rs
+index 2c682565a..e7757c792 100644
+--- a/core/vdbe/execute.rs
++++ b/core/vdbe/execute.rs
+@@ -7186,7 +7186,7 @@ pub fn op_decr_jump_zero(
+                 state.pc += 1;
+             }
+         }
+-        Register::Value(_) | Register::Record(_) => {
++        Register::Value(_) | Register::Shared(_) | Register::Record(_) => {
+             bail_constraint_error!("datatype mismatch");
+         }
+         Register::Aggregate(_) => {
+@@ -9083,9 +9083,8 @@ fn op_agg_step_slow(program: &Program, state: &mut ProgramState, data: &AggStepD
+         if let AggFunc::Count | AggFunc::Count0 = func {
+             let counts = match (func, &state.registers[*col]) {
+                 (AggFunc::Count0, _) => Some(true),
+-                (_, Register::Value(Value::Null)) => Some(false),
+-                (_, Register::Value(_) | Register::Record(_)) => Some(true),
+                 (_, Register::Aggregate(_)) => None,
++                (_, register) => Some(!register.is_null()),
+             };
+             if let Some(counts) = counts {
+                 let mut payload = state
+@@ -12282,8 +12281,10 @@ pub fn op_yield(
+                 for reg in &mut state.registers
+                     [*subtype_clear_start_reg..*subtype_clear_start_reg + *subtype_clear_count]
+                 {
+-                    if let Register::Value(Value::Text(text)) = reg {
+-                        if text.subtype == TextSubtype::Json {
++                    if matches!(reg.as_value(), Some(Value::Text(text)) if text.subtype == TextSubtype::Json)
++                    {
++                        reg.stop_sharing();
++                        if let Register::Value(Value::Text(text)) = reg {
+                             text.subtype = TextSubtype::Text;
+                         }
+                     }
+@@ -12491,14 +12492,14 @@ pub fn op_insert(
+                     if existing_key == Some(key) {
+                         let record = match &state.registers[*record_reg] {
+                             Register::Record(r) => std::borrow::Cow::Borrowed(r),
+-                            Register::Value(value) => {
+-                                let values = [value];
+-                                let record = ImmutableRecord::from_values(values, values.len())?;
+-                                std::borrow::Cow::Owned(record)
+-                            }
+                             Register::Aggregate(..) => {
+                                 unreachable!("Cannot insert an aggregate value.")
+                             }
++                            register => {
++                                let values = [register.get_value()];
++                                let record = ImmutableRecord::from_values(values, values.len())?;
++                                std::borrow::Cow::Owned(record)
++                            }
+                         };
+                         let existing_payload = return_if_io!(state, cursor.record_payload());
+                         if existing_payload.is_some_and(|p| p == record.as_ref().get_payload()) {
+@@ -12513,14 +12514,14 @@ pub fn op_insert(
+                 if !state.active_op_state.insert().is_noop_update {
+                     let record = match &state.registers[*record_reg] {
+                         Register::Record(r) => std::borrow::Cow::Borrowed(r),
+-                        Register::Value(value) => {
+-                            let values = [value];
+-                            let record = ImmutableRecord::from_values(values, values.len())?;
+-                            std::borrow::Cow::Owned(record)
+-                        }
+                         Register::Aggregate(..) => {
+                             unreachable!("Cannot insert an aggregate value.")
+                         }
++                        register => {
++                            let values = [register.get_value()];
++                            let record = ImmutableRecord::from_values(values, values.len())?;
++                            std::borrow::Cow::Owned(record)
++                        }
+                     };
+                     let cursor = get_cursor!(state, *cursor_id);
+                     let cursor = cursor.as_btree_mut();
+@@ -12616,14 +12617,14 @@ pub fn op_insert(
+ 
+                     let record = match &state.registers[*record_reg] {
+                         Register::Record(r) => std::borrow::Cow::Borrowed(r),
+-                        Register::Value(value) => {
+-                            let values = [value];
+-                            let record = ImmutableRecord::from_values(values, values.len())?;
+-                            std::borrow::Cow::Owned(record)
+-                        }
+                         Register::Aggregate(..) => {
+                             unreachable!("Cannot insert an aggregate value.")
+                         }
++                        register => {
++                            let values = [register.get_value()];
++                            let record = ImmutableRecord::from_values(values, values.len())?;
++                            std::borrow::Cow::Owned(record)
++                        }
+                     };
+ 
+                     // Add insertion of new row to view deltas
+@@ -15017,7 +15018,7 @@ pub fn op_is_null(
+     _pager: &Arc<Pager>,
+ ) -> InsnResult {
+     load_insn!(IsNull { reg, target_pc }, insn);
+-    if matches!(state.registers[*reg], Register::Value(Value::Null)) {
++    if state.registers[*reg].is_null() {
+         state.pc = target_pc.as_offset_int();
+     } else {
+         state.pc += 1;
+@@ -15817,11 +15818,7 @@ pub fn op_add_imm(
+     load_insn!(AddImm { register, value }, insn);
+ 
+     let current = &state.registers[*register];
+-    let current_value = match current {
+-        Register::Value(val) => val,
+-        Register::Aggregate(_) => &Value::Null,
+-        Register::Record(_) => &Value::Null,
+-    };
++    let current_value = current.as_value().unwrap_or(&Value::Null);
+ 
+     // SQLite coerces the register to an integer before adding.
+     let lhs = match current_value {
+@@ -15847,7 +15844,10 @@ pub fn op_variable(
+     _pager: &Arc<Pager>,
+ ) -> InsnResult {
+     load_insn!(Variable { index, dest }, insn);
+-    state.registers[*dest].set_value(state.get_parameter(*index));
++    match state.parameters.get(index.get() - 1) {
++        Some(parameter) => state.registers[*dest].share_parameter(parameter),
++        None => state.registers[*dest].set_null(),
++    }
+     state.pc += 1;
+     Ok(InsnFunctionStepResult::Step)
+ }
+@@ -18460,7 +18460,7 @@ pub fn op_hash_grace_advance_partition(
+ #[inline(always)]
+ fn apply_affinity_char(target: &mut Register, affinity: Affinity) -> bool {
+     // handle the common cases that don't require a conversion inline
+-    if let Register::Value(value) = target {
++    if let Some(value) = target.as_value() {
+         let settled = match affinity {
+             Affinity::Blob | Affinity::None => true,
+             Affinity::Text => matches!(value, Value::Text(_) | Value::Null | Value::Blob(_)),
+@@ -18482,6 +18482,23 @@ fn apply_affinity_char(target: &mut Register, affinity: Affinity) -> bool {
+ 
+ #[inline(never)]
+ fn apply_affinity_char_slow(target: &mut Register, affinity: Affinity) -> bool {
++    if let Register::Shared(shared) = target {
++        match (&**shared, affinity) {
++            (Value::Blob(_) | Value::Null, _)
++            | (_, Affinity::Blob | Affinity::None)
++            | (Value::Text(_), Affinity::Text) => return true,
++            (Value::Text(text), _) => {
++                return match text_with_numeric_affinity(text.as_str(), affinity) {
++                    Some((converted, complete)) => {
++                        *target = Register::Value(converted);
++                        complete
++                    }
++                    None => false,
++                };
++            }
++            (Value::Numeric(_), _) => target.stop_sharing(),
++        }
++    }
+     if let Register::Value(value) = target {
+         if matches!(value, Value::Blob(_)) {
+             return true;
+@@ -18514,44 +18531,13 @@ fn apply_affinity_char_slow(target: &mut Register, affinity: Affinity) -> bool {
+                 }
+ 
+                 if let Value::Text(t) = value {
+-                    let text = trim_ascii_whitespace(t.as_str());
+-
+-                    // Handle hex numbers - they shouldn't be converted
+-                    if text.starts_with("0x") {
+-                        return false;
+-                    }
+-
+-                    let (parse_result, parsed_value) = try_for_float(text.as_bytes());
+-                    let num = match parse_result {
+-                        NumericParseResult::NotNumeric | NumericParseResult::ValidPrefixOnly => {
+-                            return false;
+-                        }
+-                        NumericParseResult::PureInteger | NumericParseResult::HasDecimalOrExp => {
+-                            match parsed_value {
+-                                ParsedNumber::Integer(i) => Value::from_i64(i),
+-                                ParsedNumber::Float(f) => Value::from_f64(f),
+-                                ParsedNumber::None => return false,
+-                            }
++                    return match text_with_numeric_affinity(t.as_str(), affinity) {
++                        Some((converted, complete)) => {
++                            *value = converted;
++                            complete
+                         }
++                        None => false,
+                     };
+-
+-                    match num {
+-                        Value::Numeric(Numeric::Integer(i)) => {
+-                            *value = Value::from_i64(i);
+-                            return true;
+-                        }
+-                        Value::Numeric(Numeric::Float(fl)) => {
+-                            // For both Numeric and Integer affinity, try to convert
+-                            // float to int if exact. SQLite treats INTEGER identically
+-                            // to NUMERIC here: both enter applyNumericAffinity() with
+-                            // bTryForInt=1 (sqlite/src/vdbe.c:403-408).
+-                            return try_float_to_integer_affinity(value, f64::from(fl));
+-                        }
+-                        other => {
+-                            *value = other;
+-                            return true;
+-                        }
+-                    }
+                 }
+ 
+                 return false;
+@@ -18566,27 +18552,13 @@ fn apply_affinity_char_slow(target: &mut Register, affinity: Affinity) -> bool {
+                     return true;
+                 }
+                 Value::Text(t) => {
+-                    let text = trim_ascii_whitespace(t.as_str());
+-                    if text.starts_with("0x") {
+-                        return false;
+-                    }
+-
+-                    let (parse_result, parsed_value) = try_for_float(text.as_bytes());
+-                    let coerced = match parse_result {
+-                        NumericParseResult::NotNumeric | NumericParseResult::ValidPrefixOnly => {
+-                            return false;
+-                        }
+-                        NumericParseResult::PureInteger | NumericParseResult::HasDecimalOrExp => {
+-                            match parsed_value {
+-                                ParsedNumber::Integer(i) => Value::from_f64(i as f64),
+-                                ParsedNumber::Float(f) => Value::from_f64(f),
+-                                ParsedNumber::None => return false,
+-                            }
++                    return match text_with_numeric_affinity(t.as_str(), affinity) {
++                        Some((converted, complete)) => {
++                            *value = converted;
++                            complete
+                         }
++                        None => false,
+                     };
+-
+-                    *value = coerced;
+-                    return true;
+                 }
+                 _ => return true,
+             },
+@@ -18596,6 +18568,34 @@ fn apply_affinity_char_slow(target: &mut Register, affinity: Affinity) -> bool {
+     true
+ }
+ 
++fn text_with_numeric_affinity(text: &str, affinity: Affinity) -> Option<(Value, bool)> {
++    let text = trim_ascii_whitespace(text);
++    if text.starts_with("0x") {
++        return None;
++    }
++    let (parse_result, parsed_value) = try_for_float(text.as_bytes());
++    if matches!(
++        parse_result,
++        NumericParseResult::NotNumeric | NumericParseResult::ValidPrefixOnly
++    ) {
++        return None;
++    }
++    match (parsed_value, affinity) {
++        (ParsedNumber::None, _) => None,
++        (ParsedNumber::Integer(i), Affinity::Real) => Some((Value::from_f64(i as f64), true)),
++        (ParsedNumber::Float(f), Affinity::Real) => Some((Value::from_f64(f), true)),
++        (ParsedNumber::Integer(i), _) => Some((Value::from_i64(i), true)),
++        (ParsedNumber::Float(f), _) => match Value::from_f64(f) {
++            Value::Numeric(Numeric::Float(fl)) => {
++                let mut converted = Value::Null;
++                let complete = try_float_to_integer_affinity(&mut converted, f64::from(fl));
++                Some((converted, complete))
++            }
++            other => Some((other, true)),
++        },
++    }
++}
++
+ fn try_float_to_integer_affinity(value: &mut Value, fl: f64) -> bool {
+     // Check if the float can be exactly represented as an integer
+     if let Ok(int_val) = cast_real_to_integer(fl) {
+@@ -20638,4 +20638,78 @@ mod tests {
+             "Negating a blob subscript with invalid UTF-8 text should not panic"
+         );
+     }
++
++    mod param_sharing_tests {
++        use super::super::{apply_affinity_char, Affinity};
++        use crate::numeric::Numeric;
++        use crate::types::Text;
++        use crate::vdbe::Register;
++        use crate::Value;
++        use std::sync::Arc;
++
++        const EVERY_AFFINITY: [Affinity; 6] = [
++            Affinity::Blob,
++            Affinity::Text,
++            Affinity::Numeric,
++            Affinity::Integer,
++            Affinity::Real,
++            Affinity::None,
++        ];
++
++        #[test]
++        fn affinity_leaves_a_shared_blob_shared() {
++            let shared = Arc::new(Value::Blob(crate::alloc::vec![1u8, 2, 3]));
++            for affinity in EVERY_AFFINITY {
++                let mut register = Register::Shared(shared.clone());
++                assert!(apply_affinity_char(&mut register, affinity));
++                assert_still_shares(&register, &shared);
++            }
++        }
++
++        #[test]
++        fn text_affinity_leaves_a_shared_text_shared() {
++            let shared = Arc::new(Value::Text(Text::new("hello".to_string())));
++            let mut register = Register::Shared(shared.clone());
++            assert!(apply_affinity_char(&mut register, Affinity::Text));
++            assert_still_shares(&register, &shared);
++        }
++
++        #[test]
++        fn numeric_affinity_leaves_a_shared_non_numeric_text_shared() {
++            let shared = Arc::new(Value::Text(Text::new("hello".to_string())));
++            for affinity in [Affinity::Integer, Affinity::Numeric, Affinity::Real] {
++                let mut register = Register::Shared(shared.clone());
++                assert!(!apply_affinity_char(&mut register, affinity));
++                assert_still_shares(&register, &shared);
++            }
++        }
++
++        #[test]
++        fn integer_affinity_converts_a_shared_text_into_an_owned_integer() {
++            let shared = Arc::new(Value::Text(Text::new("42".to_string())));
++            let mut register = Register::Shared(shared.clone());
++            assert!(apply_affinity_char(&mut register, Affinity::Integer));
++            assert!(matches!(
++                register,
++                Register::Value(Value::Numeric(Numeric::Integer(42)))
++            ));
++            assert_eq!(*shared, Value::Text(Text::new("42")));
++        }
++
++        #[test]
++        fn a_shared_register_equals_an_owned_register_with_the_same_value() {
++            let value = Value::Text(Text::new("42"));
++            assert_eq!(
++                Register::Shared(Arc::new(value.clone())),
++                Register::Value(value)
++            );
++        }
++
++        fn assert_still_shares(register: &Register, shared: &Arc<Value>) {
++            let Register::Shared(held) = register else {
++                panic!("register stopped sharing: {register:?}");
++            };
++            assert!(Arc::ptr_eq(held, shared));
++        }
++    }
+ }
+diff --git a/core/vdbe/mod.rs b/core/vdbe/mod.rs
+index 228a98779..60987111f 100644
+--- a/core/vdbe/mod.rs
++++ b/core/vdbe/mod.rs
+@@ -309,19 +309,34 @@ impl CommitState {
+     }
+ }
+ 
+-#[derive(Debug, PartialEq)]
++#[derive(Debug)]
+ pub enum Register {
+     Value(Value),
++    Shared(Arc<Value>),
+     Aggregate(AggContext),
+     Record(ImmutableRecord),
+ }
+ 
++impl PartialEq for Register {
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Register::Aggregate(a), Register::Aggregate(b)) => a == b,
++            (Register::Record(a), Register::Record(b)) => a == b,
++            _ => match (self.as_value(), other.as_value()) {
++                (Some(a), Some(b)) => a == b,
++                _ => false,
++            },
++        }
++    }
++}
++
+ impl TryClone for Register {
+     type Error = TryReserveError;
+ 
+     fn try_clone(&self) -> Result<Self, Self::Error> {
+         match self {
+             Register::Value(value) => Ok(Register::Value(value.try_clone()?)),
++            Register::Shared(value) => Ok(Register::Shared(value.clone())),
+             Register::Aggregate(_) => unreachable!("aggregate accumulators cannot be copied"),
+             Register::Record(record) => Ok(Register::Record(ImmutableRecord::copy_payload(
+                 record.get_payload(),
+@@ -347,6 +362,7 @@ impl TryClone for Register {
+                 value.try_clone_from(src)?;
+                 *dst = Register::Value(value);
+             }
++            (dst, Register::Shared(src)) => *dst = Register::Shared(src.clone()),
+             (dst, Register::Record(src)) => {
+                 *dst = Register::Record(ImmutableRecord::copy_payload(
+                     src.get_payload(),
+@@ -404,8 +420,35 @@ impl Register {
+     }
+ 
+     #[inline]
+-    pub const fn is_null(&self) -> bool {
+-        matches!(self, Register::Value(Value::Null))
++    pub fn is_null(&self) -> bool {
++        matches!(self.as_value(), Some(Value::Null))
++    }
++
++    #[inline]
++    pub fn as_value(&self) -> Option<&Value> {
++        match self {
++            Register::Value(value) => Some(value),
++            Register::Shared(value) => Some(value),
++            Register::Aggregate(_) | Register::Record(_) => None,
++        }
++    }
++
++    pub fn share_parameter(&mut self, parameter: &Arc<Value>) {
++        match **parameter {
++            Value::Text(_) | Value::Blob(_) => *self = Register::Shared(parameter.clone()),
++            Value::Null => self.set_null(),
++            Value::Numeric(numeric) => self.set_numeric(numeric),
++        }
++    }
++
++    pub fn stop_sharing(&mut self) {
++        if !matches!(self, Register::Shared(_)) {
++            return;
++        }
++        let Register::Shared(shared) = std::mem::replace(self, Register::Value(Value::Null)) else {
++            unreachable!("register was checked to be shared");
++        };
++        *self = Register::Value(Arc::unwrap_or_clone(shared));
+     }
+ 
+     #[inline(always)]
+@@ -917,7 +960,7 @@ pub struct ProgramState {
+     pub query_deadline: Option<crate::MonotonicInstant>,
+     /// Excludes new root statements while an explicit checkpoint is suspended.
+     pub(crate) explicit_checkpoint_guard: Option<crate::connection::ExplicitCheckpointGuard>,
+-    pub parameters: Vec<Value>,
++    pub parameters: Vec<Arc<Value>>,
+     commit_state: CommitState,
+     /// In-flight commit-state-machine for an autonomous sequence
+     /// inner-tx. `Insn::SequenceCommitInnerTx` constructs this on first
+@@ -1138,20 +1181,12 @@ impl ProgramState {
+     pub fn bind_at(&mut self, index: NonZero<usize>, value: Value) -> Result<()> {
+         let i = index.get() - 1;
+         if i >= self.parameters.len() {
+-            self.parameters.resize(i + 1, Value::Null);
++            self.parameters.resize_with(i + 1, || Arc::new(Value::Null));
+         }
+         let slot = &mut self.parameters[i];
+-        match (slot, value) {
+-            (Value::Null, Value::Null) => {}
+-            (Value::Numeric(Numeric::Integer(existing)), Value::Numeric(Numeric::Integer(new))) => {
+-                *existing = new
+-            }
+-            (Value::Numeric(Numeric::Float(existing)), Value::Numeric(Numeric::Float(new))) => {
+-                *existing = new
+-            }
+-            (Value::Text(existing), Value::Text(new)) => existing.do_extend(&new)?,
+-            (Value::Blob(existing), Value::Blob(new)) => existing.do_extend(&new)?,
+-            (slot, value) => *slot = value,
++        match Arc::get_mut(slot) {
++            Some(existing) => *existing = value,
++            None => *slot = Arc::new(value),
+         }
+         Ok(())
+     }
+@@ -1160,9 +1195,8 @@ impl ProgramState {
+         self.parameters.clear();
+     }
+ 
+-    pub fn get_parameter(&self, index: NonZero<usize>) -> Value {
+-        let i = index.get() - 1;
+-        self.parameters.get(i).cloned().unwrap_or(Value::Null)
++    pub fn get_parameter(&self, index: NonZero<usize>) -> Option<&Arc<Value>> {
++        self.parameters.get(index.get() - 1)
+     }
+ 
+     pub fn reset(&mut self, max_registers: Option<usize>, max_cursors: Option<usize>) {
+@@ -1762,6 +1796,7 @@ impl Register {
+     pub fn get_value(&self) -> &Value {
+         match self {
+             Register::Value(v) => v,
++            Register::Shared(v) => v,
+             _ => self.get_value_of_other(),
+         }
+     }
+@@ -2248,6 +2283,7 @@ impl Program {
+                 if old_reg != new_reg {
+                     match &state.registers[i] {
+                         Register::Value(v) => eprintln!("R[{i}] = {v}"),
++                        Register::Shared(v) => eprintln!("R[{i}] = {v}"),
+                         Register::Aggregate(_) => eprintln!("R[{i}] = <aggregate>"),
+                         Register::Record(_) => eprintln!("R[{i}] = <record>"),
+                     }
+@@ -3851,10 +3887,9 @@ impl Row {
+                 .as_ref()
+                 .expect("row value pointer should be valid")
+         };
+-        let value = match value {
+-            Register::Value(value) => value,
+-            _ => unreachable!("a row should be formed of values only"),
+-        };
++        let value = value
++            .as_value()
++            .expect("a row should be formed of values only");
+         T::from_value(value)
+     }
+ 
+@@ -3865,10 +3900,9 @@ impl Row {
+                 .as_ref()
+                 .expect("row value pointer should be valid")
+         };
+-        match value {
+-            Register::Value(value) => value,
+-            _ => unreachable!("a row should be formed of values only"),
+-        }
++        value
++            .as_value()
++            .expect("a row should be formed of values only")
+     }
+ 
+     pub fn get_values(&self) -> impl Iterator<Item = &Value> {
