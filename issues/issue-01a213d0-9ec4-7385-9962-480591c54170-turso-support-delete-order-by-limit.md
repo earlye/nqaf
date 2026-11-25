@@ -17,8 +17,8 @@ The goal is SQLite's `SQLITE_ENABLE_UPDATE_DELETE_LIMIT` behavior: the
 statement deletes exactly the first rows in `ORDER BY` order, up to
 `LIMIT` (and `OFFSET`, if given). Ignoring the ORDER BY and deleting rows
 in scan order is wrong. event-sorcerer uses a bounded, ordered `DELETE`
-as a TTL eviction chunk that every cluster member runs at the same log
-index, so every member must delete the same rows.
+to evict expired rows one chunk at a time. Every cluster member runs it at
+the same log index, so every member must delete the same rows.
 
 event-sorcerer's claim 4b test accepts either behavior, so it doesn't
 need to change when this lands. The test is copied at

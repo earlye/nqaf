@@ -1,24 +1,24 @@
-From efdf54fc8de8c14f783f4f58936e0808ae790e98 Mon Sep 17 00:00:00 2001
+From 568b48d0ed353ae82b4fba2ff75c223a8094d90d Mon Sep 17 00:00:00 2001
 From: Early Ehlinger <earlye@triple-e-macbook>
-Date: Wed, 25 Nov 2026 11:51:18 -0600
+Date: Wed, 25 Nov 2026 11:57:08 -0600
 Subject: [PATCH] Apply feature-006.md
 
 ---
- .nqaf/prompts/feature-006.md        | 128 ++++++++++++++++++++++++++++
+ .nqaf/prompts/feature-006.md        | 135 ++++++++++++++++++++++++++++
  README.md                           |   1 +
- core/delete_order_by_limit_tests.rs |  85 ++++++++++++++++++
+ core/delete_order_by_limit_tests.rs | 114 +++++++++++++++++++++++
  core/lib.rs                         |   2 +
- sqlite/parser/src/parser.rs         |  13 +++
- 5 files changed, 229 insertions(+)
+ sqlite/parser/src/parser.rs         |  12 +++
+ 5 files changed, 264 insertions(+)
  create mode 100644 .nqaf/prompts/feature-006.md
  create mode 100644 core/delete_order_by_limit_tests.rs
 
 diff --git a/.nqaf/prompts/feature-006.md b/.nqaf/prompts/feature-006.md
 new file mode 100644
-index 000000000..3c7be90fe
+index 000000000..0fa60d76b
 --- /dev/null
 +++ b/.nqaf/prompts/feature-006.md
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,135 @@
 +# Refuse `DELETE ... ORDER BY` and `DELETE ... LIMIT` with an error that names the clause
 +
 +## Problem [feature-006]
@@ -85,9 +85,9 @@ index 000000000..3c7be90fe
 +
 +## Behaviour
 +
-+In `parse_delete_without_cte`, when the next token after the WHERE clause,
-+or after the RETURNING clause, is `TK_ORDER` or `TK_LIMIT`, return
-+`Error::Custom` with:
++In `parse_delete_without_cte`, after the optional WHERE clause and the
++optional RETURNING clause have been parsed, if the next token is `TK_ORDER`
++or `TK_LIMIT`, return `Error::Custom` with:
 +
 +- for `ORDER`:
 +  `near "ORDER": syntax error: ORDER BY clause is not supported in DELETE`
@@ -98,8 +98,11 @@ index 000000000..3c7be90fe
 +the existing sqltest and CLI tests match. The suffix is the message that
 +turso used before `1e21c2beb`, and it names the clause.
 +
-+Put the check in one small helper, called at both points, below
-+`parse_delete_without_cte`. Do not change UPDATE: it keeps the generic
++Put the check in one small helper below `parse_delete_without_cte`, and
++call it once, right after `parse_returning()`. `parse_where` and
++`parse_returning` consume nothing when their clause is absent, so that one
++call sees an `ORDER` or `LIMIT` that follows the table name, the WHERE
++clause, or the RETURNING clause. Do not change UPDATE: it keeps the generic
 +error. Do not change the AST, the translator, or any existing test.
 +
 +## Regression tests
@@ -122,8 +125,12 @@ index 000000000..3c7be90fe
 +   contains `LIMIT clause is not supported in DELETE`.
 +3. `DELETE FROM events WHERE delete_after < 500 RETURNING id ORDER BY id LIMIT 3`:
 +   the message contains `ORDER BY clause is not supported in DELETE`.
++4. `DELETE FROM events WHERE delete_after < 500 RETURNING id LIMIT 3`:
++   the message contains `LIMIT clause is not supported in DELETE`.
++5. `DELETE FROM events ORDER BY id LIMIT 1` (no WHERE): the message
++   contains `ORDER BY clause is not supported in DELETE`.
 +
-+All three tests must fail without the parser change (the `Debug` output is
++All five tests must fail without the parser change (the `Debug` output is
 +then a `ParseUnexpectedToken`, which contains neither message).
 +
 +## Constraints
@@ -146,25 +153,25 @@ index 000000000..3c7be90fe
 +still refused at parse time and delete nothing, as upstream, but the error
 +names the clause (`near "ORDER": syntax error: ORDER BY clause is not
 +supported in DELETE`, and the same for LIMIT), where upstream reports only
-+`near "ORDER": syntax error`.
++`near "ORDER": syntax error` or `near "LIMIT": syntax error`.
 diff --git a/README.md b/README.md
-index 446730c71..902a535d9 100644
+index 446730c71..e75d8db9c 100644
 --- a/README.md
 +++ b/README.md
 @@ -42,6 +42,7 @@ If you are re-mirroring this fork from a newer upstream release, see the fork's
  * **`IO::sync_parent_dir`** is a new required method on the `IO` trait (an **IO extension**; see [docs/adr/0001-io-extensions-are-required-trait-methods.md](docs/adr/0001-io-extensions-are-required-trait-methods.md)). It makes a file's directory entry durable. Out-of-tree `IO` implementations must now implement it; an IO that cannot provide it returns `LimboError::IoExtensionUnsupported`, and `OrphanWalPolicy::Discard` then refuses to open an empty database on it.
  * **GitHub-hosted CI.** CI runs on GitHub-hosted runners instead of Blacksmith, and jobs that need upstream secrets or publish/deploy run only in `tursodatabase/turso`.
  * **Bound parameters are shared, not copied.** Bound Text and Blob parameters are shared with the registers that read them instead of copied, so binding a parameter and reading it (even several times, or again after `Statement::reset`) no longer copies its payload. Serializing the value into the record is the only copy, unless an instruction has to change the value (for example, when column affinity turns the text `'42'` into an integer).
-+* **`DELETE ... ORDER BY` / `DELETE ... LIMIT` errors name the clause.** Like upstream, these statements are refused at parse time and delete nothing, but the error says why: `near "ORDER": syntax error: ORDER BY clause is not supported in DELETE`, or `near "LIMIT": syntax error: LIMIT clause is not supported in DELETE`. Upstream reports only `near "ORDER": syntax error`.
++* **`DELETE ... ORDER BY` / `DELETE ... LIMIT` errors name the clause.** Like upstream, these statements are refused at parse time and delete nothing, but the error says why: `near "ORDER": syntax error: ORDER BY clause is not supported in DELETE`, or `near "LIMIT": syntax error: LIMIT clause is not supported in DELETE`. Upstream reports only `near "ORDER": syntax error` or `near "LIMIT": syntax error`.
  
  ## About
  
 diff --git a/core/delete_order_by_limit_tests.rs b/core/delete_order_by_limit_tests.rs
 new file mode 100644
-index 000000000..4ab7e1d36
+index 000000000..1846e666d
 --- /dev/null
 +++ b/core/delete_order_by_limit_tests.rs
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,114 @@
 +use std::sync::Arc;
 +
 +use crate::{Connection, Database, DatabaseOpts, MemoryIO, OpenFlags, SqliteDialect, Value, IO};
@@ -208,6 +215,35 @@ index 000000000..4ab7e1d36
 +        &conn,
 +        "DELETE FROM events WHERE delete_after < 500 RETURNING id ORDER BY id LIMIT 3",
 +    );
++
++    assert!(
++        message.contains("ORDER BY clause is not supported in DELETE"),
++        "{message}"
++    );
++    assert_all_events_remain(&conn);
++}
++
++#[test]
++fn delete_with_limit_after_returning_is_refused_with_an_error_naming_limit() {
++    let conn = open_connection_with_events();
++
++    let message = delete_error_message(
++        &conn,
++        "DELETE FROM events WHERE delete_after < 500 RETURNING id LIMIT 3",
++    );
++
++    assert!(
++        message.contains("LIMIT clause is not supported in DELETE"),
++        "{message}"
++    );
++    assert_all_events_remain(&conn);
++}
++
++#[test]
++fn delete_with_order_by_and_no_where_is_refused_with_an_error_naming_order_by() {
++    let conn = open_connection_with_events();
++
++    let message = delete_error_message(&conn, "DELETE FROM events ORDER BY id LIMIT 1");
 +
 +    assert!(
 +        message.contains("ORDER BY clause is not supported in DELETE"),
@@ -264,20 +300,18 @@ index 2b942f562..9ca5e54a6 100644
  pub mod functions;
  pub mod index_method;
 diff --git a/sqlite/parser/src/parser.rs b/sqlite/parser/src/parser.rs
-index 30d3b37e4..e0214d95e 100644
+index 30d3b37e4..1517ad114 100644
 --- a/sqlite/parser/src/parser.rs
 +++ b/sqlite/parser/src/parser.rs
-@@ -4762,7 +4762,9 @@ impl<'a> Parser<'a> {
-         let tbl_name = self.parse_fullname(true)?;
+@@ -4763,6 +4763,7 @@ impl<'a> Parser<'a> {
          let indexed = self.parse_indexed()?;
          let where_clause = self.parse_where()?;
-+        self.reject_delete_order_by_or_limit()?;
          let returning = self.parse_returning()?;
 +        self.reject_delete_order_by_or_limit()?;
          Ok(Stmt::Delete {
              with,
              tbl_name,
-@@ -4772,6 +4774,17 @@ impl<'a> Parser<'a> {
+@@ -4772,6 +4773,17 @@ impl<'a> Parser<'a> {
          })
      }
  

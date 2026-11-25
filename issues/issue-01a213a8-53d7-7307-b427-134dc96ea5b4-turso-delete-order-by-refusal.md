@@ -60,10 +60,13 @@ The fix is a new prompt, `turso/prompts/feature-006.md`, applied with the
 usual scripts:
 
 - Refuse in the parser, so that nothing can run before the error.
-- The error text is `ORDER BY clause is not supported in DELETE`, which
-  matches the message at `4b59a37`.
+- The error text ends with `ORDER BY clause is not supported in DELETE`,
+  which matches the message at `4b59a37`. It keeps SQLite's
+  `near "ORDER": syntax error` prefix, so that upstream's existing tests
+  still match.
 - `DELETE ... LIMIT n` without ORDER BY is also refused, with an error
-  that names LIMIT. It has the same unordered-delete hazard.
+  that names LIMIT. It has the same problem: without an order, it would
+  delete an arbitrary set of rows.
 - Add a turso_core unit test for both cases, and add it to `turso/check`.
 
 ## Options considered
