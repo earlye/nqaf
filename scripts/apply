@@ -145,6 +145,16 @@ $(cat "$prompt")"
   git -C "$WORK_DIR" commit -m "Apply $prompt_name"
   git -C "$WORK_DIR" push origin "$BRANCH"
   echo "Committed and pushed $prompt_name to $BRANCH"
+  # If HEAD^ already has an application of this prompt, a noop may only mean
+  # that the earlier application holds the code. export_patch combines the
+  # two when it can; when it can't, the result is hollow and is refused
+  # rather than recorded as a noop.
+  if [ -n "$noop" ] \
+     && [ -n "$(git -C "$WORK_DIR" log --format=%s HEAD^ | grep -xF "Apply $prompt_name" || true)" ]; then
+    echo "Note: $prompt_name was applied earlier on this branch; not trusting the noop reason," \
+      "so the export must include the earlier application's code" >&2
+    noop=""
+  fi
   export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop"
 done
 

@@ -97,11 +97,17 @@ for prompt in "$CONFIG_DIR/prompts/"*.md; do
   fi
   # For a squash-merged PR, parent= is the pre-squash parent, which isn't on
   # the default branch; it is recorded as-is. A hollow commit (only .nqaf/)
-  # is refused (status 1) unless its .base already has noop=, leaving the
-  # stored patch as it was. Any other failure stops the script.
+  # is refused (status 1) unless its .base already has noop= for the same
+  # prompt, leaving the stored patch as it was. Any other failure stops the
+  # script.
+  base_file="$PATCHES_DIR/${prompt_name%.md}.base"
+  stored_noop=""
+  if [ "$(base_value "$base_file" prompt-sha256)" = \
+       "$(git -C "$WORK_DIR" show "$commit:.nqaf/prompts/$prompt_name" 2>/dev/null | sha256_of)" ]; then
+    stored_noop="$(base_value "$base_file" noop)"
+  fi
   status=0
-  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR" "" \
-    "$(base_value "$PATCHES_DIR/${prompt_name%.md}.base" noop)" || status=$?
+  export_patch "$WORK_DIR" "$commit" "$prompt_name" "$PATCHES_DIR" "" "$stored_noop" || status=$?
   case "$status" in
     0) ;;
     1) hollow=$((hollow + 1)) ;;

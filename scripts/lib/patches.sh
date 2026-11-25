@@ -32,8 +32,7 @@ combine_applications() {
   local work="$1" last="$2" name="$3"
   local first="$last" p subject blocker count=1
 
-  while git -C "$work" rev-parse -q --verify "$first^" >/dev/null; do
-    p="$(git -C "$work" rev-parse "$first^")"
+  while p="$(git -C "$work" rev-parse -q --verify "$first^")"; do
     blocker=""
     while :; do
       subject="$(git -C "$work" log -1 --format=%s "$p")"
@@ -127,9 +126,9 @@ noop_reason() {
 # without one it writes nothing and returns 1. Callers that trust a stored
 # noop= pass it in explicitly. noop= is recorded only for hollow commits.
 #
-# Callers test the result (to tell a hollow refusal apart), which turns off
-# set -e in here, so every step checks its own status, and any other failure
-# returns 2.
+# Callers test the return status, which turns off set -e inside this
+# function, so every step checks its own status. Returns 1 for a hollow
+# refusal and 2 for any other failure.
 export_patch() {
   local work="$1" commit="$2" name="$3" dir="$4" upstream="${5:-}" noop="${6:-}"
   local feature="${name%.md}"

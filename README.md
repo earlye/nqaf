@@ -165,7 +165,7 @@ it from the fork yourself.
    with no code change and no `noop:`, its patch is not exported, and the PR
    flags its outcome, warns at the top of the body and marks the title.
    Each feature becomes one `Apply <prompt>` commit, and its patch and
-   `.base` are exported back to `patches/`.
+   `.base` are exported back to `patches/` (unless refused as above).
 
    After all prompts, it runs the check once (`<fork-dir>/check`, else
    `make test`, else *unverified* — a fork without tests doesn't fail the
