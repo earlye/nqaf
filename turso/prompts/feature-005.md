@@ -1,6 +1,6 @@
 # Add an opt-in option to name the MVCC log `{name}-log` and reach it only through the IO
 
-## Problem [feature-003]
+## Problem [feature-005]
 
 turso finds a database's WAL through the `IO` the caller supplies, under the
 name `{name}-wal`. It finds the MVCC logical log partly through `std::fs`,

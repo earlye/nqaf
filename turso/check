@@ -4,14 +4,12 @@
 # pyo3, a glibc-2.34-compatible sqlite3, yarn via corepack).
 set -e
 . ../check-env.sh
-# make test runs no turso_core unit tests; run the ones the prompts touch
-# first, since they fail fastest: feature-001 (orphan WAL policy, its
-# multiprocess sibling, IO-trait impls in vacuum, statement lifecycle and
-# group-commit tests) and feature-003 (MVCC log suffix tests; the reload test
-# needs conn_raw_api, so it runs in its own command below). The existing mvcc
-# unit tests, which guard feature-003's option-off path, are not run here.
+# make test runs no turso_core unit tests, so first run the test modules that
+# the fork's features add or touch, because they fail fastest. feature-005's
+# reload test needs conn_raw_api, so it runs in its own command. The existing
+# mvcc unit tests, which guard feature-005's option-off path, are not run here.
 cargo test -p turso_core --lib -- orphan_wal_tests multiprocess_tests \
-  vacuum statement_lifecycle_tests group_commit_sync_mode_tests \
+  vacuum statement_lifecycle_tests group_commit_sync_mode_tests param_sharing_tests \
   mvcc_log_suffix_tests
 cargo test -p turso_core --lib --features conn_raw_api -- mvcc_log_suffix_tests
 exec make test TEST_RUNNER="sh $PWD/../sqltest-serial.sh"

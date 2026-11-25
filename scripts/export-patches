@@ -79,7 +79,7 @@ for prompt in "$CONFIG_DIR/prompts/"*.md; do
   if [ -z "$commit" ]; then
     [ "$pr_refs_loaded" -eq 1 ] || load_pr_refs
     # Newest merged PR first.
-    for n in "${pr_refs[@]}"; do
+    for n in ${pr_refs[@]+"${pr_refs[@]}"}; do
       commit="$(find_apply_commit "refs/nqaf/pull/$n" "$prompt_name")"
       if [ -n "$commit" ]; then
         echo "Found 'Apply $prompt_name' in merged PR #$n (not on origin/$default_branch; squash-merged?)"
