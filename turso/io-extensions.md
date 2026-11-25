@@ -11,7 +11,7 @@ decision against `query_interface`.
 - **Signature:** `fn sync_parent_dir(&self, path: &str, c: Completion) -> Result<Completion>`
 - **Added by:** `prompts/feature-001.md` (the orphan-WAL policy). It is
   tracked in
-  `issues/issue-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`.
+  `issues/resolved/resolved-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`.
 - **Why:** under `OrphanWalPolicy::Discard`, a newly created db file
   and its page 1 must be durable before the first WAL frame is
   written. Otherwise a power loss can leave committed WAL frames beside
