@@ -255,8 +255,8 @@ that dir.
 
 In the "Fork Features" subsection of the "About This Fork" section of
 `README.md`, add a bullet: `DatabaseOpts::with_mvcc_log_suffix_naming`
-(default off). When on, the MVCC logical log is named `{path}-log` (the
-same `{path}` that the default WAL name `{path}-wal` suffixes) instead of
+(default off). When on, the MVCC logical log is named `{path}-log`, using
+the same `{path}` as the default WAL name `{path}-wal`, instead of
 `with_extension("db-log")`, and it is opened and
 existence-checked only through the supplied `IO`. When off, naming and
 behaviour match upstream.
