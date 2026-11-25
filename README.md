@@ -89,10 +89,14 @@ it from the fork yourself.
    it. After each prompt, **the result is committed as `Apply <prompt>` and
    pushed to `<branch>` on origin immediately** — so progress survives even
    if a later prompt in the same run fails — and that commit is exported to
-   `patches/`. For a no-op, the `.base` gets a `noop=<reason>` line. Once at
-   least one prompt has run, it uses `gh` to open a PR from `<branch>` into
-   the fork's default branch (skipped if a PR already exists for that
-   branch, or if `gh` isn't installed/authed).
+   `patches/`. For a no-op, the `.base` gets a `noop=<reason>` line, unless
+   an earlier application of the same prompt changed code: then the noop is
+   ignored and the export must include that code. If it can't be combined,
+   the run stops with an error after the prompt is already recorded and
+   pushed; use `re-apply` for that prompt. Once at least one prompt has
+   run, it uses `gh` to open a PR from `<branch>` into the fork's default
+   branch (skipped if a PR already exists for that branch, or if `gh` isn't
+   installed/authed).
    Use this:
    - the first time you apply prompts to a fork, on a new branch, or
    - to apply newly-added prompts on an existing, already-pushed branch
@@ -106,11 +110,12 @@ it from the fork yourself.
    long as nothing but those commits (or empty commits, or commits that only
    delete or re-add `.nqaf/prompts/<prompt>`, such as "Removing <prompt> to
    force re-apply") sits between the first and the last. If another
-   feature's commit sits between them, only the latest delta is exported,
-   with a warning that names the commit in the way; `re-apply` will then
-   likely need the agent to repair that patch.
-   Prefer `re-apply` for changed prompts, which always produces one whole
-   commit per feature.
+   feature's commit sits between them, only the latest delta is exported
+   (or nothing, if that delta changes nothing outside `.nqaf/` and has no
+   noop reason), with a warning that names the commit in the way;
+   `re-apply` will then likely need the agent to repair that patch. Prefer
+   `re-apply` for changed prompts, which always produces one whole commit
+   per feature.
 
 3. **`scripts/export-patches <fork-dir>`** — one-time bootstrap for a fork
    whose prompts were applied before patches were stored here. Clones/fetches

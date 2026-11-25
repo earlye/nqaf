@@ -146,14 +146,15 @@ $(cat "$prompt")"
   git -C "$WORK_DIR" push origin "$BRANCH"
   echo "Committed and pushed $prompt_name to $BRANCH"
   # If an earlier application of this prompt (reachable from HEAD^) changed
-  # code, the noop may only mean that that application holds the code.
-  # export_patch combines the two when it can; when it can't, the result is
-  # hollow and is refused rather than recorded as a noop.
+  # code, the noop may only mean that the earlier application holds the
+  # code. export_patch combines the two when it can; when it can't (another
+  # commit sits between them), the result is hollow and is refused rather
+  # than recorded as a noop.
+  dropped_noop=""
   if [ -n "$noop" ]; then
     while read -r c s; do
       if [ "$s" = "Apply $prompt_name" ] && commit_touches_code "$WORK_DIR" "$c"; then
-        echo "Note: an earlier application of $prompt_name changed code; not trusting the noop" \
-          "reason, so the export must include that code" >&2
+        dropped_noop="$noop"
         noop=""
         break
       fi
@@ -162,9 +163,13 @@ $(cat "$prompt")"
   status=0
   export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop" || status=$?
   if [ "$status" -eq 1 ]; then
+    if [ -n "$dropped_noop" ]; then
+      echo "Error: the agent recorded 'noop: $dropped_noop', but an earlier application of" \
+        "$prompt_name changed code and can't be combined with this one, so that reason is not" \
+        "trusted. The stored patch was kept." >&2
+    fi
     echo "Error: $prompt_name is now recorded as applied on $BRANCH, but its patch was not" \
-      "exported, so the next apply will skip it. Use re-apply, or remove" \
-      ".nqaf/prompts/$prompt_name on the branch and run apply again." >&2
+      "exported, so the next apply will skip it. Run re-apply to carry the prompt forward." >&2
   fi
   [ "$status" -eq 0 ] || exit 1
 done
