@@ -84,6 +84,7 @@ for prompt in "${prompts[@]}"; do
   [ -f "$prompt" ] || { echo "Prompt not found: $prompt" >&2; exit 1; }
   prompt_name="$(basename "$prompt")"
   marker="$WORK_DIR/.nqaf/prompts/$prompt_name"
+  decision_file="$WORK_DIR/.nqaf/decisions/$prompt_name"
 
   if [ -f "$marker" ] && cmp -s "$prompt" "$marker"; then
     echo "Skipping $prompt_name (unchanged since last run; recorded in .nqaf/prompts/)"
@@ -91,15 +92,23 @@ for prompt in "${prompts[@]}"; do
   fi
 
   echo "Applying $prompt_name..."
+  rm -f "$decision_file"
   wrapped_prompt="This fix may already be present in this codebase (applied in an
 earlier run, merged in from upstream, or implemented independently). Before
 making any changes: inspect the relevant code and determine whether the fix
 described below has already been fully implemented.
 
-- If it has already been fully implemented, make no code changes — just
-  confirm that it is already in place.
+- If it has already been fully implemented, or upstream has superseded it,
+  make no code changes. Instead, as your very last step, write
+  \`.nqaf/decisions/$prompt_name\` containing one line \`noop: <reason>\`,
+  where <reason> says on that one line where the fix already lives or what
+  supersedes it.
 - If it has not been fully implemented (in whole or in part), implement it
-  as described below.
+  as described below. You must change code: a run that changes nothing
+  outside \`.nqaf/\` and records no \`noop:\` decision is treated as a
+  failure.
+
+Do not commit. Ignore \`.nqaf/prompts/\`; the script maintains it.
 
 ---
 
@@ -111,20 +120,58 @@ $(cat "$prompt")"
     *) echo "Unknown engine: $ENGINE" >&2; exit 1 ;;
   esac
 
-  mkdir -p "$WORK_DIR/.nqaf/prompts"
-  cp "$prompt" "$marker"
+  noop="$(noop_reason "$decision_file")"
+  rm -f "$decision_file"
 
   git -C "$WORK_DIR" add -A
   unstage_local_files "$WORK_DIR"
   drop_build_outputs "$WORK_DIR"
-  if git -C "$WORK_DIR" diff --cached --quiet; then
-    echo "No changes from $prompt_name; nothing to commit"
+  # The marker is copied in only after this check passes: a marker left
+  # behind by the exit below would make the next run skip this prompt.
+  if git -C "$WORK_DIR" diff --cached --quiet -- "${CODE_PATHSPEC[@]}"; then
+    if [ -z "$noop" ]; then
+      echo "Error: $prompt_name changed nothing outside .nqaf/ and the agent recorded no" \
+        "'noop: <reason>' in .nqaf/decisions/$prompt_name; not recording it as applied" >&2
+      exit 1
+    fi
+    echo "No code changes from $prompt_name (noop: $noop)"
   else
-    git -C "$WORK_DIR" commit -m "Apply $prompt_name"
-    git -C "$WORK_DIR" push origin "$BRANCH"
-    echo "Committed and pushed $prompt_name to $BRANCH"
-    export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR"
+    noop=""
   fi
+
+  mkdir -p "$WORK_DIR/.nqaf/prompts"
+  cp "$prompt" "$marker"
+  git -C "$WORK_DIR" add -- "$marker"
+  git -C "$WORK_DIR" commit -m "Apply $prompt_name"
+  git -C "$WORK_DIR" push origin "$BRANCH"
+  echo "Committed and pushed $prompt_name to $BRANCH"
+  # If an earlier application of this prompt (reachable from HEAD^) changed
+  # code, the noop may only mean that the earlier application holds the
+  # code. export_patch combines the two when it can; when it can't (another
+  # commit sits between them), the result is hollow and is refused rather
+  # than recorded as a noop.
+  dropped_noop=""
+  if [ -n "$noop" ]; then
+    while read -r c s; do
+      if [ "$s" = "Apply $prompt_name" ] && commit_touches_code "$WORK_DIR" "$c"; then
+        dropped_noop="$noop"
+        noop=""
+        break
+      fi
+    done < <(git -C "$WORK_DIR" log --format='%H %s' -F --grep="Apply $prompt_name" HEAD^)
+  fi
+  status=0
+  export_patch "$WORK_DIR" HEAD "$prompt_name" "$PATCHES_DIR" "" "$noop" || status=$?
+  if [ "$status" -eq 1 ]; then
+    if [ -n "$dropped_noop" ]; then
+      echo "Error: the agent recorded 'noop: $dropped_noop', but an earlier application of" \
+        "$prompt_name changed code and can't be combined with this one, so that reason is not" \
+        "trusted. The stored patch was kept." >&2
+    fi
+    echo "Error: $prompt_name is now recorded as applied on $BRANCH, but its patch was not" \
+      "exported, so the next apply will skip it. Run re-apply to carry the prompt forward." >&2
+  fi
+  [ "$status" -eq 0 ] || exit 1
 done
 
 if [ "$HAVE_GH" -eq 1 ]; then

@@ -75,6 +75,9 @@ if [ "$(git -C "$WORK_DIR" rev-parse 'HEAD^{tree}')" = "$(git -C "$WORK_DIR" rev
   git -C "$WORK_DIR" branch -q -D "$branch"
   echo "Fork already matches rebuild: upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")" \
     "plus ${#names[@]} feature(s) gives the same tree as origin/$default_branch. Nothing to push."
+  if [ -n "$unexported" ]; then
+    echo "Warning: no code changes and no noop reason (the fork may lack these features):$unexported" >&2
+  fi
   exit 0
 fi
 
@@ -89,6 +92,7 @@ print_summary
 
 title="NQAF: rebuild fork on upstream $(git -C "$WORK_DIR" rev-parse --short "$upstream_head")"
 [ "$check_result" = "fail" ] && title="$title (CHECK FAILED)"
+[ -n "$unexported" ] && title="$title (FEATURES NOT EXPORTED)"
 push_and_open_pr "$branch" "$title" "$pr_body"
 
 if [ "$check_result" = "fail" ]; then
