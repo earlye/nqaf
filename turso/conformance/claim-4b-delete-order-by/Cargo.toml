@@ -1,0 +1,29 @@
+# Its own workspace root. The root manifest's `exclude` is not sufficient on its
+# own: cargo walks *up* from this directory looking for a workspace, and git
+# worktrees under `.claude/worktrees/` sit inside the main checkout, so it finds
+# that repo's manifest and errors with "current package believes it's in a
+# workspace when it's not". An empty `[workspace]` here settles it regardless of
+# what any ancestor directory contains.
+[workspace]
+
+[package]
+name = "turso-conformance"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Deliberately NOT a workspace member — see docs/adr/0003-turso-conformance-crate.md.
+# The `claim_*` tests are expected to be red until the property they pin actually
+# holds in earlye-forks/turso; excluding this crate keeps that red off the root
+# build. Run it on purpose:
+#
+#   cargo test --manifest-path turso-conformance/Cargo.toml
+#
+# `smoke` must always be green. Smoke red — or zero tests reported at all —
+# is rot in this suite, and no claim result means anything until it is fixed.
+
+[dependencies]
+turso_core = { git = "https://github.com/earlye-forks/turso.git" }
+
+[dev-dependencies]
+anyhow = "1"
