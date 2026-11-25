@@ -3,7 +3,7 @@
 ## Context
 
 This is a deferred decision. On 2026-09-28, while grilling
-`issues/issue-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`,
+`issues/resolved/resolved-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`,
 we decided to keep the orphan-WAL discard as an opt-in option that
 lives only in the fork: a `turso/prompts/feature-NNN.md` prompt applied
 to `earlye-forks/turso`, off by default. We will not propose it to
@@ -34,6 +34,6 @@ If this goes upstream, the upstream issue can reuse Reproduction steps
 
 ## Blocked by
 
-- `issues/issue-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`
+- `issues/resolved/resolved-01a0e610-b729-7cc3-97e6-e8b99cb808f0-turso-discard-orphan-wal.md`
   must land in the fork first, since its patch is what would be
   proposed upstream.

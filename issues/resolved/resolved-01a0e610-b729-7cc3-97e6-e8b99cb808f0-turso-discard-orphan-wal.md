@@ -437,9 +437,13 @@ Expect that gate to be slow or noisy for this fork.
   https://github.com/earlye-forks/turso/pull/1, fix commit `190db39d3`.
   The agent reported that `turso_core --lib` passed 2132 and failed 0,
   and that the 11 new tests pass. Windows and wasm were not built.
-- [ ] Merge the fork PR, then bump event-sorcerer's turso pin and add
-  the conformance claim. That happens in the event-sorcerer session,
-  which has the decisions.
+- [x] Merge the fork PR. Done: PR #1 merged as `4769a4bc`. After the
+  2026-10-07 rebase (fork PR #4), fork `main` carries the fix as
+  `dffdd20c` ("Apply feature-001.md"), checked on 2026-11-24.
+- [ ] Bump event-sorcerer's turso pin and add the conformance claim.
+  This is outside nqaf. It happens in the event-sorcerer session, which
+  has the decisions, and is tracked by the event-sorcerer issue under
+  "Blocking". The nqaf side of this issue is complete.
 
 ## Relevant files
 
