@@ -42,8 +42,8 @@ or v8 type.
 
 ### 1. `obscura_js::init_v8`
 
-Add this public API to `obscura-js` (a new module, or next to
-`crates/obscura-js/src/v8_flags.rs`):
+Add this public API in a new module, `crates/obscura-js/src/platform.rs`,
+and re-export it at the crate root as `obscura_js::{init_v8, V8Platform}`:
 
 ```rust
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,7 +60,6 @@ pub enum V8Platform {
     Unprotected,
 }
 
-#[must_use]
 pub fn init_v8(platform: V8Platform) -> V8Platform
 ```
 
@@ -68,7 +67,9 @@ Use the same name and signature at every layer (see step 2).
 
 Mechanism:
 
-- A private `static PLATFORM: OnceLock<V8Platform>`.
+- A private `static PLATFORM: OnceLock<(V8Platform, bool)>`, holding the
+  kind that was initialized and whether that first init was explicit (a
+  call to `init_v8`) or implicit (`ensure_v8`, below).
 - A private `fn do_init(platform: V8Platform)` that does the real work:
   1. Apply obscura's configured V8 flags. Start from
      `crates/obscura-js/src/v8_flags.rs` and apply them here, before the
@@ -78,18 +79,21 @@ Mechanism:
      `Some(v8::new_unprotected_default_platform(...).make_shared())`
      (check that function's arguments in the locked `v8` version; thread
      pool size `0` means "V8 picks").
-- Public `init_v8(p)`: `let kind = *PLATFORM.get_or_init(|| { do_init(p); p });`.
-  If `kind != p`, log a warning (use the logging crate obscura already
-  uses, e.g. `tracing`) that says V8 was already initialized with `kind`
-  and `p` was ignored. Never panic. Return `kind`.
-- Private `pub(crate) fn ensure_v8()`: only
-  `PLATFORM.get_or_init(|| { do_init(V8Platform::Default); V8Platform::Default });`.
-  It never compares and never warns.
+- Public `init_v8(p)`:
+  `let (kind, explicit) = *PLATFORM.get_or_init(|| { do_init(p); (p, true) });`.
+  Log with `tracing::warn!` in either of these cases, and never panic:
+  - `kind != p`: V8 was already initialized with `kind`, and `p` was
+    ignored.
+  - `!explicit`: V8 was already initialized implicitly by runtime
+    creation, so this call cannot choose the initializing thread. This
+    fires even when `kind == p`: a `Page` created on another thread before
+    `main` calls `init_v8(Default)` is exactly the layout that crashes on
+    PKU hardware.
 
-So an embedder that calls `init_v8(Unprotected)` after obscura already
-initialized `Default` implicitly gets a warning and a return value of
-`Default`. That embedder is the one who can still segfault, so the warning
-must fire in that case.
+  Return `kind`.
+- Crate-private `pub(crate) fn ensure_v8()`: only
+  `PLATFORM.get_or_init(|| { do_init(V8Platform::Default); (V8Platform::Default, false) });`.
+  It never compares and never warns.
 
 Details to check against the locked deno_core source, not against this
 prompt:
@@ -126,13 +130,11 @@ wins; later calls are no-ops apart from the warning.
 
 ### 2. Re-export through `obscura-browser` and the facade
 
-Follow the layering that the earlier DOM-telemetry prompt used for
-`subscribe_dom_changes`:
+Follow the layering already used for `subscribe_dom_changes`:
 
 - In `crates/obscura-browser/src/lib.rs`, next to the existing
   `pub use obscura_js::...` re-exports, add
-  `pub use obscura_js::{init_v8, V8Platform};` (adjust the path to the
-  module you chose).
+  `pub use obscura_js::{init_v8, V8Platform};`.
 - In `crates/obscura/src/lib.rs`, add
   `pub use obscura_browser::{init_v8, V8Platform};`, with a one-line doc
   pointer to the `obscura_js` rustdoc.
@@ -152,14 +154,18 @@ Call `ensure_v8()` immediately before `JsRuntime::new`. Because of the
   runtime. Single-thread and thread-descendant layouts keep working.
 - An explicit earlier `init_v8` call wins, and `ensure_v8` becomes a no-op
   with no warning.
+- A later `init_v8` call warns, as described in step 1.
 
 deno_core guards its own `init_v8` with a `Once`, so the call inside
 `JsRuntime::new` stays harmless after obscura has initialized the
 platform. Leave `RuntimeOptions.v8_platform` as `None` so that it cannot
 override the platform chosen in step 1.
 
-If other places in the fork create a `JsRuntime` (workers, the CDP server,
-tests, benchmarks), route them through `ensure_v8` too. If the obscura
+Route any other `JsRuntime` creation inside `obscura-js` through
+`ensure_v8` too. Code in other crates that creates a `JsRuntime` directly
+(the CDP server, tests, benchmarks) cannot call the crate-private
+`ensure_v8`; have it call `obscura_js::init_v8(V8Platform::Default)` first
+instead. If the obscura
 binary (CLI or CDP server) has its own `main` that spawns threads before
 creating runtimes, call `init_v8(V8Platform::Default)` there, early.
 
@@ -171,17 +177,18 @@ ids would reject valid layouts.
 
 Add a subsection to the fork README under "About this fork" → "Fork
 Features" (an earlier prompt in this series creates that section; create
-it if it is missing). Show the call from `main`, using the return value:
+it if it is missing). Show the call from `main`:
 
 ```rust
 fn main() {
-    let platform = obscura::init_v8(obscura::V8Platform::Default);
-    assert_eq!(platform, obscura::V8Platform::Default);
+    obscura::init_v8(obscura::V8Platform::Default);
     // ... build the tokio runtime, spawn threads, create Browsers ...
 }
 ```
 
-Say when to choose `Unprotected` instead, and that any direct deno_core or
+Add one sentence on the return value: for callers that call `init_v8`
+later, it reports the kind that obscura's first init requested, which may
+differ from the one they asked for. Say when to choose `Unprotected` instead, and that any direct deno_core or
 v8 platform init must be removed when adopting `init_v8`.
 
 ## Tests
@@ -189,19 +196,22 @@ v8 platform init must be removed when adopting `init_v8`.
 The PKU crash itself cannot be reproduced on arm64 or on x86-64 hardware
 without PKU, so do not try to test the crash. Do test the API.
 
-V8 platform init is process-wide and happens once per process, and libtest
-runs each `#[test]` on its own thread. Those threads are siblings. If two
+V8 platform init happens once per process, and libtest runs each
+`#[test]` on its own thread. Those threads are siblings. If two
 tests in one binary share a `Default` init, every test but the first
 creates its runtime on a sibling of the initializing thread, which is the
 layout that crashes on PKU hardware while the first isolate is alive. So:
 
-- **`Default`: one `#[test]` per integration-test file**, with the
-  `init_v8` call and any child threads inside that test. In that one test:
-  call `init_v8(Default)` twice and check that both return `Default`; call
-  `init_v8(Unprotected)` and check that it returns `Default` without
-  panicking; then create a `Browser`/`Page` and evaluate a trivial script.
-  Optionally, also spawn a thread from inside the test after init and
-  evaluate a script on a `Page` created there.
+- **`Default`: its own integration-test file containing exactly one
+  `#[test]`**, with every init and any child threads inside that test. In
+  that one test, first create a `Browser`/`Page` without calling `init_v8`
+  and evaluate a trivial script; this is the implicit init. Then call
+  `init_v8(Default)` twice and check that both calls return `Default`
+  without panicking (they take the "initialized implicitly" warning path).
+  Then call `init_v8(Unprotected)` and check that it returns `Default`
+  without panicking. Optionally, also spawn a thread from inside the test
+  and evaluate a script on a `Page` created there. The `Unprotected` file
+  below covers an explicit init followed by page creation.
 - **`Unprotected`: a separate integration-test file.** Several tests may
   share one binary here, since the unprotected platform has no thread
   restriction. Every test in that file must call `init_v8(Unprotected)`
