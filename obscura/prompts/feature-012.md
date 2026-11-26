@@ -69,12 +69,22 @@ Mechanism:
   kind that was initialized and whether that first init was explicit (a
   call to `init_v8`) or implicit (`ensure_v8`, below).
 - A private `fn do_init(platform: V8Platform)` that does the real work:
-  1. Apply obscura's configured V8 flags. Start from
-     `crates/obscura-js/src/v8_flags.rs`. Move obscura's existing flag
-     application into `do_init`, so that the flags are set exactly once,
-     before `init_platform`. Remove any other call that could run after
-     the platform is initialized; V8 freezes flags after platform init by
-     default, so a leftover call could fail or be ignored.
+  1. Call `crate::v8_flags::mark_platform_started()`. Confirm the
+     following in `crates/obscura-js/src/v8_flags.rs`; it is expected, not
+     verified against the fork. That module is expected to keep no stored
+     flag configuration. Its public `set_v8_flags(&str)` is expected to
+     apply flags immediately through `v8::V8::set_flags_from_string`. Its
+     only protection against a late call is expected to be a
+     `PLATFORM_STARTED` flag, which `mark_platform_started()` sets and
+     which runtime construction currently sets. Setting flags after
+     platform init makes V8 call `V8_Fatal` and abort the process. So
+     `do_init` must mark the platform as started before `init_platform`,
+     or a `set_v8_flags` call after an explicit `init_v8` would abort.
+     Keep `set_v8_flags` as an immediate apply (the CLI and tests use it),
+     do not buffer flags, and keep the existing `mark_platform_started()`
+     call in runtime construction. If the module differs from this
+     description, keep the same goal: any flag call after `init_v8` must
+     be rejected the way a late call is rejected today, not abort.
   2. Call `deno_core::JsRuntime::init_platform`. For `Default`, pass
      `None`. For `Unprotected`, pass
      `Some(v8::new_unprotected_default_platform(...).make_shared())`
@@ -127,7 +137,8 @@ obscura, and deno_core silently ignores a second platform init. Say this
 in the rustdoc. Also say that embedders must remove any direct deno_core or
 v8 platform init when they adopt `init_v8` (c3 must drop its
 `init_platform(None, false)` call in the same change), and that calling it
-from `main` before spawning threads is the intended use. The first
+from `main` before spawning threads is the intended use, and that any
+`set_v8_flags` call must come before `init_v8`. The first
 initialization wins, whether it came from an `init_v8` call or from
 obscura creating its first runtime. Later calls change nothing; they log a
 warning if their requested kind was ignored or if V8 was already
@@ -168,11 +179,11 @@ warning for every runtime (if a `Page` had already initialized V8
 implicitly).
 
 The CDP server is expected to initialize V8 early with
-`drop(ObscuraJsRuntime::new())`; confirm this. Optionally, replace that
-with `init_v8(V8Platform::Default)`. If the obscura binary (CLI or CDP
-server) has a `main` that spawns threads before creating runtimes and
-does not already initialize V8 early, call `init_v8(V8Platform::Default)`
-there, early.
+`drop(ObscuraJsRuntime::new())`; confirm this, and leave it as it is
+(it goes through `ensure_v8`). If the obscura binary (CLI or CDP server)
+has a `main` that spawns threads before creating runtimes and does not
+already initialize V8 early, call `init_v8(V8Platform::Default)` there,
+early, but after its existing `set_v8_flags` call.
 
 Detecting at runtime that a thread lacks access to the protected platform
 is out of scope: there is no reliable signal for it, and comparing thread
@@ -195,7 +206,8 @@ Add one sentence on the return value: for callers that call `init_v8`
 later, it reports the kind that obscura's first init requested, which may
 differ from the one they asked for. Say when to choose `Unprotected`
 instead, and that any direct deno_core or v8 platform init must be removed
-when adopting `init_v8`.
+when adopting `init_v8`. Also say that any `set_v8_flags` call must come
+before `init_v8`.
 
 ## Tests
 
@@ -223,7 +235,10 @@ So write three integration-test files, each containing exactly one
 - **Explicit `Default` (the path that c3 and the README use).** Call
   `init_v8(Default)` and check that it returns `Default`. Create a `Page`
   and evaluate a script. Then spawn a thread inside the test, create a
-  `Page` there and evaluate a script.
+  `Page` there and evaluate a script. Optionally, also call
+  `set_v8_flags` after `init_v8` and check that the process does not
+  abort and that the call is rejected the way a late call is rejected
+  today.
 - **`Unprotected`.** Call `init_v8(Unprotected)` twice and check that both
   calls return `Unprotected`. Check that a later `init_v8(Default)` returns
   `Unprotected`. Then spawn a thread, create a `Page` on it and evaluate a
